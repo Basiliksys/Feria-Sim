@@ -1,0 +1,16 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.venv/
+venv/
+
+# Симуляція та тимчасові збереження (генеруються локально через `init` / `serve`)
+save/
+*.tmp
+
+# Тести / IDE
+.pytest_cache/
+.vscode/
+.idea/

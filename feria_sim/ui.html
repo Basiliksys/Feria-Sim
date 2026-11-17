@@ -1,0 +1,1195 @@
+<!DOCTYPE html>
+<html lang="uk">
+<head>
+<meta charset="utf-8">
+<title>Ферія — Симуляція економіки та подій</title>
+<style>
+  :root {
+    --bg: #0e1116; --panel: #161b22; --card: #1c222b; --border: #2b3441;
+    --text: #e6edf3; --muted: #8b949e; --accent: #d4a64a; --accent2: #58a6ff;
+    --good: #3fb950; --bad: #f85149; --warn: #d29922;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; font: 14px/1.45 "Segoe UI", system-ui, sans-serif; background: var(--bg); color: var(--text); }
+  header { display: flex; flex-wrap: wrap; align-items: center; gap: 12px; padding: 10px 16px; background: var(--panel); border-bottom: 1px solid var(--border); position: sticky; top: 0; z-index: 20; }
+  .brand { font-weight: 700; font-size: 16px; color: var(--accent); margin-right: 8px; }
+  .pill { background: var(--card); border: 1px solid var(--border); border-radius: 6px; padding: 4px 10px; font-size: 13px; }
+  .pill b { color: var(--accent); }
+  .controls { margin-left: auto; display: flex; gap: 6px; flex-wrap: wrap; align-items: center; }
+  button, select, input { background: var(--card); color: var(--text); border: 1px solid var(--border); border-radius: 6px; padding: 6px 10px; font: inherit; }
+  button { cursor: pointer; transition: .15s; }
+  button:hover { border-color: var(--accent); color: var(--accent); }
+  button.primary { background: #263549; border-color: var(--accent2); color: #fff; }
+  button.primary:hover { background: #2f435d; }
+  button.danger { border-color: var(--bad); color: var(--bad); }
+  button:disabled { opacity: 0.5; cursor: wait; }
+  nav { display: flex; gap: 4px; padding: 8px 16px 0; background: var(--panel); border-bottom: 1px solid var(--border); }
+  nav button { border-bottom-left-radius: 0; border-bottom-right-radius: 0; border-bottom: none; padding: 8px 14px; background: transparent; color: var(--muted); }
+  nav button.active { background: var(--bg); color: var(--accent); border-color: var(--border); font-weight: 600; }
+  main { padding: 16px; max-width: 1520px; margin: 0 auto; }
+  .tab { display: none; }
+  .tab.active { display: block; }
+  .grid { display: grid; gap: 14px; }
+  .g2 { grid-template-columns: 1.5fr 1fr; }
+  .g3 { grid-template-columns: repeat(3, 1fr); }
+  .g4 { grid-template-columns: repeat(4, 1fr); }
+  @media (max-width: 1000px) { .g2, .g3, .g4 { grid-template-columns: 1fr; } }
+  .card { background: var(--panel); border: 1px solid var(--border); border-radius: 8px; padding: 12px 14px; }
+  .card h3 { margin: 0 0 10px; font-size: 14px; text-transform: uppercase; letter-spacing: .5px; color: var(--accent); display: flex; justify-content: space-between; align-items: center; }
+  table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  th, td { text-align: left; padding: 6px 8px; border-bottom: 1px solid var(--border); }
+  th { color: var(--muted); font-weight: 600; position: sticky; top: 0; background: var(--panel); cursor: pointer; }
+  tr:hover td { background: rgba(255,255,255,0.03); }
+  .num { text-align: right; font-variant-numeric: tabular-nums; }
+  .scroll { max-height: 460px; overflow: auto; }
+  .tag { display: inline-block; padding: 1px 6px; border-radius: 4px; font-size: 11px; border: 1px solid var(--border); margin-right: 4px; }
+  .tag.good { color: var(--good); border-color: var(--good); }
+  .tag.bad { color: var(--bad); border-color: var(--bad); }
+  .tag.warn { color: var(--warn); border-color: var(--warn); }
+  .map-wrap { position: relative; background: #09131e; border: 1px solid var(--border); border-radius: 8px; overflow: hidden; height: 540px; }
+  canvas#map { width: 100%; height: 100%; display: block; cursor: grab; }
+  canvas#map:active { cursor: grabbing; }
+  .map-legend { position: absolute; left: 10px; bottom: 10px; background: rgba(14,17,22,0.88); border: 1px solid var(--border); border-radius: 6px; padding: 6px 10px; font-size: 12px; display: flex; gap: 10px; flex-wrap: wrap; }
+  .map-tip { position: absolute; pointer-events: none; background: rgba(14,17,22,0.94); border: 1px solid var(--accent); border-radius: 6px; padding: 6px 10px; font-size: 12px; display: none; z-index: 5; max-width: 260px; }
+  .row { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; margin-bottom: 8px; }
+  .muted { color: var(--muted); }
+  .chart-box { width: 100%; height: 160px; }
+  .toast { position: fixed; right: 16px; bottom: 16px; background: var(--card); border: 1px solid var(--accent); border-radius: 8px; padding: 10px 14px; z-index: 50; display: none; max-width: 420px; }
+  a.link { color: var(--accent2); cursor: pointer; text-decoration: none; }
+  a.link:hover { text-decoration: underline; }
+  .modal-bg { position: fixed; inset: 0; background: rgba(0,0,0,0.7); display: none; align-items: center; justify-content: center; z-index: 60; padding: 16px; }
+  .modal-bg.open { display: flex; }
+  .modal { background: var(--panel); border: 1px solid var(--border); border-radius: 10px; max-width: 580px; width: 100%; padding: 18px; box-shadow: 0 20px 50px rgba(0,0,0,0.6); }
+  .dropzone { border: 2px dashed var(--border); border-radius: 8px; padding: 22px; text-align: center; cursor: pointer; margin: 10px 0; transition: .15s; background: var(--card); }
+  .dropzone:hover, .dropzone.drag { border-color: var(--accent); background: #1f2733; }
+</style>
+</head>
+<body>
+<header>
+  <span class="brand" id="h-brand">⚔ ФЕРІЯ</span>
+  <span class="pill">Дата: <b id="h-date">—</b></span>
+  <span class="pill">Населення: <b id="h-pop">—</b></span>
+  <span class="pill">ВВП/міс: <b id="h-gdp">—</b></span>
+  <span class="pill">Індекс їжі: <b id="h-food">—</b></span>
+  <span class="pill">Війни: <b id="h-wars">—</b></span>
+  <div class="controls">
+    <button class="primary" onclick="stepSim(1)">+1 міс</button>
+    <button onclick="stepSim(3)">+3 міс</button>
+    <button onclick="stepSim(12)">+1 рік</button>
+    <button id="btn-undo" onclick="undoStep()" disabled title="Скасувати останню дію">↩ Крок назад</button>
+    <button onclick="exportObsidian()">📓 В Obsidian</button>
+    <button onclick="openSlotsModal()">💾 Слоти</button>
+    <button onclick="openMapModal()">🗺 Завантажити карту</button>
+  </div>
+</header>
+
+<nav>
+  <button class="active" data-tab="overview" onclick="showTab('overview', this)">Карта й Огляд</button>
+  <button data-tab="states" onclick="showTab('states', this)">Держави</button>
+  <button data-tab="economy" onclick="showTab('economy', this)">Ринки й Товари</button>
+  <button data-tab="dnd" onclick="showTab('dnd', this)">🎲 D&D Стіл</button>
+  <button data-tab="politics" onclick="showTab('politics', this)">Війни, Похід і Гільдії</button>
+  <button data-tab="gm" onclick="showTab('gm', this)">Журнал і Керування (ГМ)</button>
+</nav>
+
+<main>
+  <!-- КАРТА Й ОГЛЯД -->
+  <section id="tab-overview" class="tab active">
+    <div class="grid g2">
+      <div class="card">
+        <h3>Інтерактивна карта світу <span id="map-econ-badge" class="tag"></span>
+          <span class="row" style="margin:0;font-weight:400;text-transform:none">
+            <select id="map-mode" onchange="drawMap()" style="padding:4px 8px">
+              <option value="political">Політична карта</option>
+              <option value="food">Ціни на їжу / Голод</option>
+              <option value="stability">Стабільність</option>
+              <option value="wealth">Багатство (ВВП)</option>
+              <option value="war">Війни та епідемії</option>
+            </select>
+            <label><input type="checkbox" id="chk-routes" checked onchange="drawMap()"> Шляхи</label>
+            <label><input type="checkbox" id="chk-labels" checked onchange="drawMap()"> Назви</label>
+            <button onclick="resetView()">Скинути зум</button>
+          </span>
+        </h3>
+        <div class="map-wrap">
+          <canvas id="map"></canvas>
+          <div id="map-tip" class="map-tip"></div>
+          <div class="map-legend">
+            <span>★ Столиця</span>
+            <span>◆ Ринок</span>
+            <span>🌋 Вулкан</span>
+            <span style="color:#f85149">● Війна / Епідемія</span>
+            <span class="muted">Коліщатко — зум · Клік — деталі</span>
+          </div>
+        </div>
+      </div>
+      <div class="grid" style="align-content:start">
+        <div class="card">
+          <h3>Динаміка світу</h3>
+          <div id="world-charts"></div>
+        </div>
+        <div class="card">
+          <h3>Активні події та лиха (<span id="ev-cnt">0</span>)</h3>
+          <div class="scroll" style="max-height:220px" id="active-events"></div>
+        </div>
+      </div>
+    </div>
+    <div class="card" style="margin-top:14px">
+      <h3>Останні важливі події</h3>
+      <div class="scroll" style="max-height:240px" id="recent-journal"></div>
+    </div>
+  </section>
+
+  <!-- ДЕРЖАВИ -->
+  <section id="tab-states" class="tab">
+    <div class="grid g2">
+      <div class="card">
+        <h3>Усі держави світу
+          <span class="row" style="margin:0">
+            <input id="st-search" placeholder="Пошук..." oninput="renderStatesTable()">
+            <select id="st-cont" onchange="renderStatesTable()">
+              <option value="">Усі континенти</option>
+              <option value="Турс">Турс</option>
+              <option value="Кірос">Кірос</option>
+            </select>
+          </span>
+        </h3>
+        <div class="scroll" style="max-height:640px">
+          <table>
+            <thead><tr>
+              <th onclick="sortStates('uk')">Держава</th>
+              <th>Конт.</th>
+              <th class="num" onclick="sortStates('pop')">Насел.</th>
+              <th class="num" onclick="sortStates('gdp')">ВВП/міс</th>
+              <th class="num" onclick="sortStates('treasury')">Казна</th>
+              <th class="num" onclick="sortStates('stab')">Стаб.</th>
+              <th class="num" onclick="sortStates('power')">Сила</th>
+              <th class="num" onclick="sortStates('food')">Їжа</th>
+            </tr></thead>
+            <tbody id="states-tbody"></tbody>
+          </table>
+        </div>
+      </div>
+      <div class="card" id="state-detail">
+        <h3>Паспорт держави</h3>
+        <p class="muted">Оберіть державу зі списку ліворуч або клацніть по місту на карті.</p>
+      </div>
+    </div>
+  </section>
+
+  <!-- РИНКИ Й ТОВАРИ -->
+  <section id="tab-economy" class="tab">
+    <div class="grid g2">
+      <div class="card">
+        <h3>Світовий каталог (71 товар)
+          <input id="gd-search" placeholder="Пошук товару..." oninput="renderGoodsTable()">
+        </h3>
+        <div class="scroll" style="max-height:640px">
+          <table>
+            <thead><tr>
+              <th>Товар</th><th class="num">База</th><th class="num">Мін</th><th class="num">Серед.</th>
+              <th class="num">Макс</th><th>Дешево</th><th>Дорого</th><th class="num">Запас</th>
+            </tr></thead>
+            <tbody id="goods-tbody"></tbody>
+          </table>
+        </div>
+      </div>
+      <div class="card">
+        <h3>Деталі ринку
+          <select id="mk-select" onchange="loadMarket(this.value)"></select>
+        </h3>
+        <div id="market-detail" class="scroll" style="max-height:640px"></div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ВІЙНИ, ПОХІД І ГІЛЬДІЇ -->
+  <section id="tab-politics" class="tab">
+    <div class="grid g2">
+      <div class="card">
+        <h3>Активні війни</h3>
+        <div id="wars-list"></div>
+        <h3 style="margin-top:16px">Четвертий Великий Похід на Кірос</h3>
+        <div id="crusade-box"></div>
+      </div>
+      <div class="card">
+        <h3>Гільдії, найманці та ордени</h3>
+        <div class="scroll" style="max-height:620px" id="guilds-box"></div>
+      </div>
+    </div>
+  </section>
+
+  <!-- D&D СТІЛ -->
+  <section id="tab-dnd" class="tab">
+    <div class="grid g2">
+      <div class="card">
+        <h3>Роздрібні D&D-ціни міста
+          <span class="row" style="margin:0;font-weight:400;text-transform:none">
+            <input id="dnd-city-filter" placeholder="Фільтр міста..." style="width:140px" oninput="filterCitySelect('dnd-city-filter','dnd-retail-burg')">
+            <select id="dnd-retail-burg" onchange="loadRetail(this.value)"></select>
+            <button onclick="renameSelectedRetailCity()" title="Перейменувати в overrides.json">✏</button>
+          </span>
+        </h3>
+        <div class="row">
+          <select id="dnd-retail-cat" onchange="renderRetailTable()">
+            <option value="">Усі категорії</option>
+          </select>
+          <span id="dnd-retail-mods" class="muted"></span>
+        </div>
+        <div class="scroll" style="max-height:520px">
+          <table>
+            <thead><tr><th>Товар / Послуга</th><th>Категорія</th><th class="num">Ціна</th><th class="num">% бази</th><th>Статус</th></tr></thead>
+            <tbody id="dnd-retail-tbody"></tbody>
+          </table>
+        </div>
+      </div>
+
+      <div class="grid" style="align-content:start">
+        <div class="card">
+          <h3>Калькулятор маршруту і небезпеки подорожі</h3>
+          <div class="row">
+            <input id="rt-from-f" placeholder="Звідки (фільтр)..." style="width:130px" oninput="filterCitySelect('rt-from-f','rt-from')">
+            <select id="rt-from" style="flex:1"></select>
+          </div>
+          <div class="row">
+            <input id="rt-to-f" placeholder="Куди (фільтр)..." style="width:130px" oninput="filterCitySelect('rt-to-f','rt-to')">
+            <select id="rt-to" style="flex:1"></select>
+          </div>
+          <div class="row">
+            <select id="rt-mode">
+              <option value="foot">Пішки (36 км/д)</option>
+              <option value="wagon">Обоз / віз (28 км/д)</option>
+              <option value="horse">Верхи (55 км/д)</option>
+              <option value="ship">Кораблем (морський пріоритет)</option>
+            </select>
+            <button class="primary" onclick="calcTravelRoute()">Прокласти маршрут</button>
+            <button onclick="clearRouteOverlay()">Очистити на карті</button>
+          </div>
+          <div id="rt-result" class="muted">Оберіть два міста й натисніть «Прокласти маршрут».</div>
+        </div>
+
+        <div class="card">
+          <h3>Квестові гачки та чутки
+            <span class="row" style="margin:0;font-weight:400;text-transform:none">
+              <select id="dnd-quest-state" onchange="loadQuests()"><option value="">Усі держави</option></select>
+              <button onclick="loadQuests()">↻</button>
+            </span>
+          </h3>
+          <div class="scroll" style="max-height:280px" id="dnd-quests-box"></div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ЖУРНАЛ І КЕРУВАННЯ ГМ -->
+  <section id="tab-gm" class="tab">
+    <div class="grid g3">
+      <div class="card">
+        <h3>Викликати подію вручну</h3>
+        <div class="row"><select id="gm-ev-key" style="width:100%" onchange="syncEventTargets()"></select></div>
+        <div class="row"><select id="gm-ev-tgt" style="width:100%"><option value="auto">Випадкова ціль</option></select></div>
+        <div class="row">
+          <select id="gm-ev-sev"><option value="">Випадкова сила</option><option value="1">1 — помірна</option><option value="2">2 — серйозна</option><option value="3">3 — катастрофічна</option></select>
+          <button class="primary" onclick="gmFire()">Запустити подію</button>
+        </div>
+      </div>
+      <div class="card">
+        <h3>Дипломатія та війна</h3>
+        <div class="row">
+          <select id="gm-war-a" style="flex:1"></select>
+          <span>проти</span>
+          <select id="gm-war-b" style="flex:1"></select>
+        </div>
+        <button class="danger" onclick="gmDeclareWar()">Оголосити війну</button>
+      </div>
+      <div class="card">
+        <h3>Редагувати державу</h3>
+        <div class="row">
+          <select id="gm-st-id" style="width:100%"></select>
+        </div>
+        <div class="row">
+          <select id="gm-st-field">
+            <option value="treasury">treasury (казна)</option>
+            <option value="tax_mult">tax_mult (множник податку)</option>
+            <option value="stability">stability (стабільність 0..100)</option>
+            <option value="legitimacy">legitimacy (легітимність)</option>
+            <option value="debt">debt (борг)</option>
+          </select>
+          <input id="gm-st-val" type="number" step="0.1" style="width:110px" placeholder="значення">
+          <button class="primary" onclick="gmSetState()">Зберегти</button>
+        </div>
+      </div>
+    </div>
+    <div class="card" style="margin-top:14px">
+      <h3>Повний журнал подій
+        <span class="row" style="margin:0">
+          <select id="j-kind" onchange="loadJournal()">
+            <option value="">Усі типи</option><option value="war">war</option><option value="event">event</option>
+            <option value="diplomacy">diplomacy</option><option value="politics">politics</option>
+            <option value="disease">disease</option><option value="crusade">crusade</option><option value="gm">gm</option>
+          </select>
+          <input id="j-q" placeholder="Фільтр тексту..." oninput="loadJournal()">
+        </span>
+      </h3>
+      <div class="scroll" style="max-height:460px" id="journal-full"></div>
+    </div>
+  </section>
+</main>
+
+<div id="map-modal" class="modal-bg" onclick="if(event.target===this)closeMapModal()">
+  <div class="modal">
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">
+      <h3 style="margin:0;color:var(--accent)">Завантажити карту з Azgaar FMG</h3>
+      <button onclick="closeMapModal()">✕</button>
+    </div>
+    <p class="muted" style="margin:0 0 8px">
+      Відкрийте <a class="link" href="https://azgaar.github.io/Fantasy-Map-Generator/" target="_blank">azgaar.github.io/Fantasy-Map-Generator</a> → <b>Save → .map</b> (або <b>JSON</b>), після чого виберіть або перетягніть файл нижче. Якщо на карті немає власної економіки (ванільний Azgaar), ринки, родовища й ремесла буде згенеровано автоматично.
+    </p>
+    <div id="dropzone" class="dropzone" onclick="document.getElementById('map-file-in').click()">
+      <b>Натисніть або перетягніть файл (.map / .json / .gz)</b>
+      <div class="muted" id="map-file-label" style="margin-top:4px">Файл не обрано</div>
+      <input id="map-file-in" type="file" accept=".map,.json,.gz" style="display:none" onchange="onMapFilePicked(this.files[0])">
+    </div>
+    <div class="row">
+      <label>Стартовий рік: <input id="mp-year" type="number" value="1250" style="width:90px"></label>
+      <label>Ера: <input id="mp-era" type="text" value="Н.Е." style="width:70px"></label>
+      <label>Seed: <input id="mp-seed" type="number" value="1" style="width:70px"></label>
+      <button class="primary" id="mp-upload-btn" onclick="submitUploadedMap()" style="margin-left:auto">Імпортувати й симулювати</button>
+    </div>
+    <div id="mp-status" class="muted" style="margin-top:6px"></div>
+    <div style="margin-top:12px;border-top:1px solid var(--border);padding-top:10px">
+      <div class="muted" style="margin-bottom:6px">Або переключитись на збережену карту:</div>
+      <div class="row" style="margin-bottom:0">
+        <select id="mp-saved" style="flex:1"></select>
+        <button onclick="submitSavedMap()">Завантажити</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div id="slots-modal" class="modal-bg" onclick="if(event.target===this)closeSlotsModal()">
+  <div class="modal">
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">
+      <h3 style="margin:0;color:var(--accent)">Слоти збережень та знімки кампанії</h3>
+      <button onclick="closeSlotsModal()">✕</button>
+    </div>
+    <div class="row">
+      <input id="slot-name" placeholder="Назва збереження (напр. Сесія 12)" style="flex:1">
+      <button class="primary" onclick="saveNewSlot()">💾 Зберегти слот</button>
+    </div>
+    <div class="scroll" style="max-height:340px" id="slots-list"></div>
+  </div>
+</div>
+
+<div id="toast" class="toast"></div>
+
+<script>
+let DATA = null;
+let GEO = { ready: false, land: [], lakes: [], states: {}, borders: [], rivers: [] };
+let sortKey = 'gdp', sortDir = -1;
+let view = { x: 0, y: 0, s: 1 };
+let drag = null;
+window._activeRoute = null;
+window._dndSortedBurgs = [];
+window._retailData = null;
+
+function escHtml(s) {
+  return String(s ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+}
+function fmtN(x) {
+  if (x == null) return '—';
+  if (Math.abs(x) >= 1e6) return (x/1e6).toFixed(2) + ' млн';
+  if (Math.abs(x) >= 1e3) return (x/1e3).toFixed(1) + ' тис.';
+  return Math.round(x).toString();
+}
+function toast(msg) {
+  const el = document.getElementById('toast');
+  el.textContent = msg; el.style.display = 'block';
+  clearTimeout(toast._t); toast._t = setTimeout(() => el.style.display = 'none', 4500);
+}
+async function api(url, body) {
+  const opt = body ? { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify(body) } : {};
+  const r = await fetch(url, opt);
+  return r.json();
+}
+function showTab(name, btn) {
+  document.querySelectorAll('.tab').forEach(x => x.classList.remove('active'));
+  document.querySelectorAll('nav button').forEach(x => x.classList.remove('active'));
+  document.getElementById('tab-' + name).classList.add('active');
+  const navBtn = btn || document.querySelector(`nav button[data-tab="${name}"]`);
+  if (navBtn) navBtn.classList.add('active');
+  if (name === 'economy') { loadGoods(); }
+  if (name === 'dnd') { initDndTab(); }
+  if (name === 'politics') { loadGuilds(); }
+  if (name === 'gm') { loadJournal(); }
+  if (name === 'overview') { setTimeout(drawMap, 20); }
+}
+
+let _lastMapKey = null;
+async function loadGeo() {
+  const g = await api('/api/map_geo');
+  GEO = {
+    ready: true,
+    land: (g.land || []).map(d => new Path2D(d)),
+    lakes: (g.lakes || []).map(d => new Path2D(d)),
+    borders: (g.borders || []).map(d => new Path2D(d)),
+    rivers: (g.rivers || []).map(d => new Path2D(d)),
+    states: {},
+  };
+  for (const [sid, d] of Object.entries(g.states || {})) {
+    if (d) GEO.states[sid] = new Path2D(d);
+  }
+  drawMap();
+}
+
+async function refresh() {
+  DATA = await api('/api/overview');
+  const mapKey = `${DATA.world_name}|${DATA.source_file}|${DATA.states.length}`;
+  const mapChanged = (_lastMapKey !== null && _lastMapKey !== mapKey);
+  _lastMapKey = mapKey;
+  document.title = `${DATA.world_name} — Симуляція економіки та подій`;
+  document.getElementById('h-brand').textContent = '⚔ ' + (DATA.world_name || 'ФЕРІЯ').toUpperCase();
+  const badge = document.getElementById('map-econ-badge');
+  if (badge) badge.textContent = DATA.has_native_economy ? 'економіка з .map' : 'синтезована економіка';
+  document.getElementById('h-date').textContent = DATA.date;
+  document.getElementById('h-pop').textContent = fmtN(DATA.tot_pop);
+  document.getElementById('h-gdp').textContent = fmtN(DATA.tot_gdp) + ' зм';
+  document.getElementById('h-food').textContent = DATA.indices.food.toFixed(2) + 'x';
+  document.getElementById('h-wars').textContent = DATA.wars.length;
+  const undoBtn = document.getElementById('btn-undo');
+  if (undoBtn) {
+    undoBtn.disabled = !(DATA.undo_count > 0);
+    undoBtn.title = DATA.undo_count > 0 ? `Скасувати: ${DATA.undo_label}` : 'Немає дій для скасування';
+  }
+  // динамічний фільтр континентів
+  const contSel = document.getElementById('st-cont');
+  const prevCont = contSel.value;
+  contSel.innerHTML = '<option value="">Усі континенти</option>' +
+    (DATA.continents || []).map(c => `<option value="${c}">${c}</option>`).join('');
+  if ((DATA.continents || []).includes(prevCont)) contSel.value = prevCont;
+  if (mapChanged) {
+    document.getElementById('mk-select').innerHTML = '';
+    window._activeRoute = null;
+    window._dndInited = false;
+    view = { x: 0, y: 0, s: 1 };
+    resetView();
+  }
+  if (!GEO.ready || mapChanged) {
+    loadGeo();
+  }
+  renderWorldCharts();
+  renderActiveEvents();
+  renderRecentJournal();
+  renderStatesTable();
+  renderWarsAndCrusade();
+  populateSelects(mapChanged);
+  drawMap();
+}
+
+async function stepSim(months) {
+  document.querySelectorAll('.controls button').forEach(b => b.disabled = true);
+  try {
+    DATA = await api('/api/step', { months });
+    await refresh();
+    toast(`Симуляція просунулась на ${months} міс. → ${DATA.date}`);
+  } finally {
+    document.querySelectorAll('.controls button').forEach(b => b.disabled = false);
+  }
+}
+async function undoStep() {
+  const res = await api('/api/undo', {});
+  if (res.error) { toast(res.error); return; }
+  await refresh();
+  toast(res.message || 'Крок скасовано');
+}
+async function exportObsidian() {
+  const res = await api('/api/report', {});
+  toast(res.message || 'Експортовано');
+}
+
+// ---------------- КАРТА І ТЕПЛОВІ ШАРИ
+function resetView() {
+  const cv = document.getElementById('map');
+  const s = Math.min(cv.clientWidth / DATA.width, cv.clientHeight / DATA.height);
+  view = { s, x: (cv.clientWidth - DATA.width * s) / 2, y: (cv.clientHeight - DATA.height * s) / 2 };
+  drawMap();
+}
+function _stateHeatColor(s, warStates, epiStates, maxGdp, mode) {
+  if (mode === 'food') {
+    const f = s.food_idx ?? 1.0;
+    if (f <= 0.95) return 'rgba(63,185,80,0.68)';
+    if (f <= 1.25) return 'rgba(130,190,70,0.66)';
+    if (f <= 1.65) return 'rgba(210,153,34,0.72)';
+    return 'rgba(248,81,73,0.78)';
+  }
+  if (mode === 'stability') {
+    if (s.stab >= 65) return 'rgba(63,185,80,0.68)';
+    if (s.stab >= 40) return 'rgba(210,153,34,0.72)';
+    return 'rgba(248,81,73,0.78)';
+  }
+  if (mode === 'wealth') {
+    const t = Math.min(1, Math.sqrt(Math.max(s.gdp, 0) / Math.max(maxGdp, 1)));
+    const r = Math.round(35 + 185 * t), g = Math.round(52 + 125 * t), b = Math.round(80 - 20 * t);
+    return `rgba(${r},${g},${b},0.78)`;
+  }
+  if (mode === 'war') {
+    if (warStates.has(s.id)) return 'rgba(248,81,73,0.78)';
+    if (epiStates.has(s.id)) return 'rgba(210,153,34,0.74)';
+    return 'rgba(43,54,72,0.55)';
+  }
+  return s.color || '#4a5d73';
+}
+function drawMap() {
+  if (!DATA) return;
+  const cv = document.getElementById('map');
+  const dpr = window.devicePixelRatio || 1;
+  const w = cv.clientWidth, h = cv.clientHeight;
+  if (!w || !h) return;
+  if (cv.width !== w * dpr || cv.height !== h * dpr) { cv.width = w * dpr; cv.height = h * dpr; }
+  if (view.s === 1 && view.x === 0) {
+    view.s = Math.min(w / DATA.width, h / DATA.height);
+    view.x = (w - DATA.width * view.s) / 2; view.y = (h - DATA.height * view.s) / 2;
+  }
+  const ctx = cv.getContext('2d');
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  ctx.fillStyle = '#08121c'; ctx.fillRect(0, 0, w, h);
+  ctx.save(); ctx.translate(view.x, view.y); ctx.scale(view.s, view.s);
+
+  const mode = document.getElementById('map-mode')?.value || 'political';
+  const warStates = new Set();
+  for (const wr of DATA.wars) { wr.attackers.forEach(a => warStates.add(a.id)); wr.defenders.forEach(d => warStates.add(d.id)); }
+  const epiMks = new Set(), epiStates = new Set();
+  const mkById = new Map(DATA.markets.map(m => [m.id, m]));
+  for (const ep of DATA.epidemics) {
+    ep.markets.forEach(m => {
+      epiMks.add(m.id);
+      const mk = mkById.get(m.id);
+      if (mk) epiStates.add(mk.state);
+    });
+  }
+  const maxGdp = Math.max(1, ...DATA.states.map(s => s.gdp || 0));
+
+  // 1) Контури суші, держав, озер, річок, кордонів
+  if (GEO.ready) {
+    ctx.fillStyle = '#18222e';
+    for (const p of GEO.land) ctx.fill(p);
+
+    ctx.save();
+    for (const s of DATA.states) {
+      const sp = GEO.states[String(s.id)];
+      if (!sp) continue;
+      ctx.globalAlpha = mode === 'political' ? 0.56 : 0.85;
+      ctx.fillStyle = _stateHeatColor(s, warStates, epiStates, maxGdp, mode);
+      ctx.fill(sp);
+    }
+    ctx.restore();
+
+    ctx.fillStyle = '#0a1929';
+    for (const p of GEO.lakes) ctx.fill(p);
+
+    ctx.strokeStyle = 'rgba(88,166,255,0.42)';
+    ctx.lineWidth = 1.0 / view.s;
+    for (const p of GEO.rivers) ctx.stroke(p);
+
+    ctx.strokeStyle = 'rgba(255,255,255,0.28)';
+    ctx.lineWidth = 1.1 / view.s;
+    for (const p of GEO.borders) ctx.stroke(p);
+  }
+
+  // розділювач Кірос / Турс (лише для Ферії)
+  if (DATA.is_feria) {
+    ctx.strokeStyle = 'rgba(255,255,255,0.08)'; ctx.lineWidth = 2 / view.s;
+    ctx.beginPath(); ctx.moveTo(1150, 0); ctx.lineTo(1150, DATA.height); ctx.stroke();
+  }
+
+  if (document.getElementById('chk-routes').checked) {
+    for (const e of DATA.edges) {
+      if (mode === 'wealth') {
+        ctx.strokeStyle = e.sea ? 'rgba(88,166,255,0.42)' : 'rgba(212,166,74,0.48)';
+        ctx.lineWidth = Math.max(1.0, Math.min(5.5, Math.sqrt(e.flow || 1) * 0.35)) / view.s;
+      } else {
+        ctx.strokeStyle = e.sea ? 'rgba(88,166,255,0.24)' : 'rgba(212,166,74,0.28)';
+        ctx.lineWidth = Math.max(0.7, Math.min(4, Math.sqrt(e.flow || 1) * 0.25)) / view.s;
+      }
+      ctx.beginPath(); ctx.moveTo(e.ax, e.ay); ctx.lineTo(e.bx, e.by); ctx.stroke();
+    }
+  }
+
+  // Підсвічений маршрут подорожі з D&D-калькулятора
+  if (window._activeRoute?.points?.length > 1) {
+    const pts = window._activeRoute.points;
+    ctx.save();
+    ctx.strokeStyle = '#ffd166';
+    ctx.lineWidth = 3.2 / view.s;
+    ctx.setLineDash([8 / view.s, 5 / view.s]);
+    ctx.beginPath();
+    ctx.moveTo(pts[0].x, pts[0].y);
+    for (let i = 1; i < pts.length; i++) ctx.lineTo(pts[i].x, pts[i].y);
+    ctx.stroke();
+    ctx.setLineDash([]);
+    ctx.fillStyle = '#ffd166';
+    for (const pt of pts) {
+      ctx.beginPath(); ctx.arc(pt.x, pt.y, 4.5 / view.s, 0, Math.PI * 2); ctx.fill();
+    }
+    ctx.restore();
+  }
+
+  for (const b of DATA.burgs) {
+    const r = (b.cap ? 5.2 : 2.6) / Math.pow(view.s, 0.55);
+    ctx.fillStyle = b.color || '#aaa';
+    ctx.beginPath(); ctx.arc(b.x, b.y, r, 0, Math.PI * 2); ctx.fill();
+    if (b.cap && warStates.has(b.state)) {
+      ctx.strokeStyle = '#f85149'; ctx.lineWidth = 1.6 / view.s;
+      ctx.beginPath(); ctx.arc(b.x, b.y, r + 3 / view.s, 0, Math.PI * 2); ctx.stroke();
+    }
+  }
+  for (const m of DATA.markets) {
+    const r = 4.2 / Math.pow(view.s, 0.55);
+    ctx.strokeStyle = epiMks.has(m.id) ? '#f85149' : '#fff';
+    ctx.lineWidth = 1.2 / view.s;
+    ctx.strokeRect(m.x - r, m.y - r, r * 2, r * 2);
+  }
+  for (const mk of DATA.markers) {
+    ctx.fillStyle = '#ff6b35';
+    ctx.beginPath(); ctx.arc(mk.x, mk.y, 4 / view.s, 0, Math.PI * 2); ctx.fill();
+  }
+  if (document.getElementById('chk-labels').checked) {
+    ctx.font = `${Math.max(10, 11 / view.s)}px sans-serif`;
+    ctx.fillStyle = 'rgba(230,237,243,0.92)';
+    for (const s of DATA.states) {
+      if (s.gdp > 50000 || view.s > 1.3) ctx.fillText(s.uk, s.cx + 6 / view.s, s.cy - 4 / view.s);
+    }
+  }
+  ctx.restore();
+}
+function _findStateAtPoint(wx, wy) {
+  if (!GEO.ready) return null;
+  const cv = document.getElementById('map');
+  const ctx = cv.getContext('2d');
+  ctx.save();
+  ctx.setTransform(1, 0, 0, 1, 0, 0);
+  let hit = null;
+  for (const [sid, p] of Object.entries(GEO.states)) {
+    if (ctx.isPointInPath(p, wx, wy)) { hit = Number(sid); break; }
+  }
+  ctx.restore();
+  return hit;
+}
+function initMapEvents() {
+  const cv = document.getElementById('map'), tip = document.getElementById('map-tip');
+  cv.addEventListener('wheel', e => {
+    e.preventDefault();
+    const rc = cv.getBoundingClientRect(), mx = e.clientX - rc.left, my = e.clientY - rc.top;
+    const f = e.deltaY < 0 ? 1.18 : 1 / 1.18;
+    const ns = Math.max(0.25, Math.min(12, view.s * f));
+    view.x = mx - (mx - view.x) * (ns / view.s);
+    view.y = my - (my - view.y) * (ns / view.s);
+    view.s = ns; drawMap();
+  }, { passive: false });
+  cv.addEventListener('mousedown', e => { drag = { x: e.clientX - view.x, y: e.clientY - view.y, moved: false }; });
+  window.addEventListener('mouseup', () => { drag = null; });
+  cv.addEventListener('mousemove', e => {
+    const rc = cv.getBoundingClientRect(), mx = e.clientX - rc.left, my = e.clientY - rc.top;
+    if (drag) { drag.moved = true; view.x = e.clientX - drag.x; view.y = e.clientY - drag.y; drawMap(); tip.style.display='none'; return; }
+    if (!DATA) return;
+    const wx = (mx - view.x) / view.s, wy = (my - view.y) / view.s;
+    let best = null, bd = (14 / view.s) ** 2;
+    for (const b of DATA.burgs) { const d = (b.x - wx)**2 + (b.y - wy)**2; if (d < bd) { bd = d; best = b; } }
+    if (best) {
+      const st = DATA.states.find(s => s.id === best.state);
+      tip.innerHTML = `<b>${best.uk}</b> ${best.cap?'★':''}${best.port?'⚓':''}<br>${st?st.uk:''}<br>Населення: ${fmtN(best.pop)}${st?`<br>Їжа: ${st.food_idx}x · Стаб.: ${st.stab.toFixed(0)}`:''}`;
+      tip.style.left = (mx + 12) + 'px'; tip.style.top = (my + 12) + 'px'; tip.style.display = 'block';
+    } else {
+      const sid = _findStateAtPoint(wx, wy);
+      const st = sid != null ? DATA.states.find(s => s.id === sid) : null;
+      if (st) {
+        tip.innerHTML = `<b>${st.uk}</b> (${st.cont})<br>Насел.: ${fmtN(st.pop)} · Стаб.: ${st.stab.toFixed(0)}<br>Їжа: ${st.food_idx}x · ВВП: ${fmtN(st.gdp)}`;
+        tip.style.left = (mx + 12) + 'px'; tip.style.top = (my + 12) + 'px'; tip.style.display = 'block';
+      } else tip.style.display = 'none';
+    }
+  });
+  cv.addEventListener('click', e => {
+    if (drag && drag.moved) return;
+    const rc = cv.getBoundingClientRect(), wx = (e.clientX - rc.left - view.x) / view.s, wy = (e.clientY - rc.top - view.y) / view.s;
+    let best = null, bd = (16 / view.s) ** 2;
+    for (const b of DATA.burgs) { const d = (b.x - wx)**2 + (b.y - wy)**2; if (d < bd) { bd = d; best = b; } }
+    if (best) { openState(best.state); return; }
+    const sid = _findStateAtPoint(wx, wy);
+    if (sid != null) { openState(sid); }
+  });
+}
+
+// ---------------- ГРАФІКИ
+function svgLine(pts, color, label, fmt) {
+  if (!pts.length) return `<div class="muted">${label}: замало даних (зробіть кілька кроків)</div>`;
+  const W = 400, H = 70, pad = 6;
+  const mn = Math.min(...pts), mx = Math.max(...pts), span = (mx - mn) || 1;
+  const d = pts.map((v, i) => `${(i / Math.max(pts.length - 1, 1) * (W - 2*pad) + pad).toFixed(1)},${(H - pad - (v - mn)/span * (H - 2*pad)).toFixed(1)}`).join(' ');
+  return `<div style="margin-bottom:6px"><div style="font-size:12px;display:flex;justify-content:space-between"><span>${label}</span><b>${fmt(pts[pts.length-1])} <span class="muted">(${fmt(mn)}..${fmt(mx)})</span></b></div>
+    <svg viewBox="0 0 ${W} ${H}" style="width:100%;height:56px;background:#0e1116;border-radius:4px"><polyline fill="none" stroke="${color}" stroke-width="2" points="${d}"/></svg></div>`;
+}
+function renderWorldCharts() {
+  const h = DATA.history || [];
+  const box = document.getElementById('world-charts');
+  if (h.length < 2) { box.innerHTML = '<p class="muted">Зробіть 2+ місяці симуляції (+1 міс / +3 міс), щоб з’явилися графіки.</p>'; return; }
+  box.innerHTML =
+    svgLine(h.map(r => r[1]), '#3fb950', 'Населення світу', fmtN) +
+    svgLine(h.map(r => r[2]), '#d4a64a', 'Світовий ВВП/міс', fmtN) +
+    svgLine(h.map(r => r[3]), '#58a6ff', 'Індекс цін їжі', v => v.toFixed(2) + 'x');
+}
+
+// ---------------- ОГЛЯД ПОДІЙ
+function renderActiveEvents() {
+  const evs = DATA.active_events, eps = DATA.epidemics;
+  document.getElementById('ev-cnt').textContent = evs.length + eps.length;
+  let html = '';
+  for (const ep of eps) {
+    html += `<div style="margin-bottom:6px"><span class="tag bad">Епідемія</span> <b>${ep.name}</b> — ${ep.markets.map(m => m.uk).join(', ')}</div>`;
+  }
+  for (const e of evs) {
+    html += `<div style="margin-bottom:6px"><span class="tag warn">Сил.${e.sev}</span> <b>${e.title}</b> (${e.target}, ще ${e.months_left} міс.)</div>`;
+  }
+  document.getElementById('active-events').innerHTML = html || '<span class="muted">Спокійно</span>';
+}
+function renderRecentJournal() {
+  document.getElementById('recent-journal').innerHTML = DATA.journal.map(r =>
+    `<div style="padding:4px 0;border-bottom:1px solid var(--border)"><span class="tag">${r.kind}</span> <span class="muted">${r.m}/${r.y}</span> ${r.text}</div>`
+  ).join('');
+}
+
+// ---------------- ДЕРЖАВИ
+function sortStates(k) { if (sortKey === k) sortDir *= -1; else { sortKey = k; sortDir = -1; } renderStatesTable(); }
+function renderStatesTable() {
+  if (!DATA) return;
+  const q = document.getElementById('st-search').value.toLowerCase();
+  const c = document.getElementById('st-cont').value;
+  let rows = DATA.states.filter(s => (!c || s.cont === c) && (!q || s.uk.toLowerCase().includes(q) || s.name.toLowerCase().includes(q)));
+  rows.sort((a, b) => (a[sortKey] > b[sortKey] ? 1 : -1) * sortDir);
+  document.getElementById('states-tbody').innerHTML = rows.map(s => `
+    <tr>
+      <td><a class="link" onclick="openState(${s.id})">${s.uk}</a> ${s.wars?'<span class="tag bad">війна</span>':''}</td>
+      <td>${s.cont}</td>
+      <td class="num">${fmtN(s.pop)}</td>
+      <td class="num">${fmtN(s.gdp)}</td>
+      <td class="num">${fmtN(s.treasury)}</td>
+      <td class="num">${s.stab.toFixed(0)}</td>
+      <td class="num">${fmtN(s.power)}</td>
+      <td class="num">${s.food.toFixed(0)}%</td>
+    </tr>`).join('');
+}
+async function openState(sid) {
+  showTab('states');
+  const d = await api('/api/state?id=' + sid);
+  if (d.error) return;
+  const s = d.summary;
+  const box = document.getElementById('state-detail');
+  box.innerHTML = `
+    <h3><span>${escHtml(d.uk)} <span class="muted" style="font-size:12px">${escHtml(d.full_name)}</span></span>
+      <button onclick="toggleStateEditor()" style="text-transform:none;font-weight:400">✏ Редагувати назву / лор (overrides.json)</button>
+    </h3>
+    <div id="state-edit-form" style="display:none;background:var(--card);border:1px solid var(--border);border-radius:6px;padding:10px;margin-bottom:10px">
+      <div class="row"><label style="flex:1">Назва (укр.): <input id="ov-st-uk" value="${escHtml(d.uk)}" style="width:100%"></label>
+      <label style="flex:1">Правитель: <input id="ov-st-ruler" value="${escHtml(d.ruler.name)}" style="width:100%"></label></div>
+      <div class="row"><label style="flex:1">Валюта: <input id="ov-st-coins" value="${escHtml(d.coins)}" style="width:100%"></label>
+      <label style="flex:1">Устрій: <input id="ov-st-gov" value="${escHtml(d.gov)}" style="width:100%"></label></div>
+      <div class="row"><label style="width:100%">Примітка / лор:<textarea id="ov-st-lore" rows="2" style="width:100%;background:var(--panel);color:var(--text);border:1px solid var(--border);border-radius:6px;padding:6px">${escHtml(d.lore || '')}</textarea></label></div>
+      <div class="row" style="margin-bottom:0"><button class="primary" onclick="saveStateOverride(${d.id})">Зберегти в overrides.json</button><button onclick="toggleStateEditor()">Скасувати</button></div>
+    </div>
+    <p>${escHtml(d.cont)} · ${escHtml(d.gov)} · ${escHtml(d.culture)} / ${escHtml(d.religion)} · Валюта: <b>${escHtml(d.coins)}</b></p>
+    ${d.lore?`<p class="muted">${escHtml(d.lore)}</p>`:''}
+    <p><b>Правитель:</b> ${escHtml(d.ruler.name)} ${d.ruler.age?`(${d.ruler.age} р.)`:''} — ${d.ruler_traits.join(', ')}</p>
+    <div class="grid g3" style="margin:10px 0">
+      <div class="pill">Населення: <b>${fmtN(s.pop)}</b></div>
+      <div class="pill">ВВП/міс: <b>${fmtN(s.gdp)}</b></div>
+      <div class="pill">Казна: <b>${s.treasury_coins}</b></div>
+      <div class="pill">Дохід/Витрати: <b>${fmtN(s.rev)} / ${fmtN(s.exp)}</b></div>
+      <div class="pill">Стаб./Легіт.: <b>${s.stab} / ${s.leg}</b></div>
+      <div class="pill">Армія (сила): <b>${fmtN(s.power)}</b></div>
+    </div>
+    <p><b>Склад армії:</b> ${Object.entries(d.army).map(([u,n])=>`${u}: ${n}`).join(', ')} ${d.mercs.length?(' | Найманці: '+d.mercs.join(', ')):''}</p>
+    <p><b>Вороги:</b> ${d.worst.slice(0,4).map(x=>`<a class="link" onclick="openState(${x.id})">${x.uk}</a> (${x.score})`).join(', ')}</p>
+    <p><b>Друзі:</b> ${d.best.slice(0,4).map(x=>`<a class="link" onclick="openState(${x.id})">${x.uk}</a> (${x.score})`).join(', ')}</p>
+    <h4 style="margin:10px 0 6px;color:var(--accent)">Найбільші міста</h4>
+    <div class="scroll" style="max-height:180px"><table><thead><tr><th>Місто</th><th class="num">Насел.</th><th>Ринок</th></tr></thead>
+      <tbody>${d.cities.map(c=>`<tr><td>${escHtml(c.uk)} ${c.capital?'★':''}${c.port?'⚓':''} <a class="link" onclick="renameBurgPrompt(${c.id}, '${escHtml(c.uk)}', ${d.id})" title="Перейменувати">✏</a></td><td class="num">${fmtN(c.pop)}</td><td><a class="link" onclick="openMarket(${c.market_id})">${escHtml(c.market_uk)}</a></td></tr>`).join('')}</tbody></table></div>
+    <h4 style="margin:10px 0 6px;color:var(--accent)">Хроніка</h4>
+    <div class="scroll" style="max-height:160px">${d.journal.map(r=>`<div><span class="muted">${r.m}/${r.y}</span> ${r.text}</div>`).join('')}</div>`;
+}
+function toggleStateEditor() {
+  const f = document.getElementById('state-edit-form');
+  if (f) f.style.display = f.style.display === 'none' ? 'block' : 'none';
+}
+async function saveStateOverride(sid) {
+  const res = await api('/api/override', {
+    kind: 'state',
+    id: sid,
+    fields: {
+      uk: document.getElementById('ov-st-uk').value,
+      ruler: document.getElementById('ov-st-ruler').value,
+      coins: document.getElementById('ov-st-coins').value,
+      gov: document.getElementById('ov-st-gov').value,
+      lore: document.getElementById('ov-st-lore').value,
+    }
+  });
+  toast(res.message || res.error);
+  await refresh();
+  await openState(sid);
+}
+async function renameBurgPrompt(bid, oldUk, sid) {
+  const uk = prompt(`Нова українська назва для міста «${oldUk}»:`, oldUk);
+  if (!uk || uk.trim() === oldUk) return;
+  const res = await api('/api/override', { kind: 'burg', id: bid, fields: { uk: uk.trim() } });
+  toast(res.message || res.error);
+  await refresh();
+  if (sid != null) await openState(sid);
+}
+
+// ---------------- РИНКИ Й ТОВАРИ
+async function loadGoods() {
+  const res = await api('/api/goods');
+  window._goods = res.goods;
+  renderGoodsTable();
+  const sel = document.getElementById('mk-select');
+  if (!sel.options.length && DATA) {
+    sel.innerHTML = DATA.markets.slice().sort((a,b)=>a.uk.localeCompare(b.uk)).map(m => `<option value="${m.id}">${m.uk} (${m.state_uk})</option>`).join('');
+    loadMarket(sel.value);
+  }
+}
+function renderGoodsTable() {
+  if (!window._goods) return;
+  const q = document.getElementById('gd-search').value.toLowerCase();
+  const rows = window._goods.filter(g => !q || g.name.toLowerCase().includes(q));
+  document.getElementById('goods-tbody').innerHTML = rows.map(g => `
+    <tr>
+      <td><b>${g.name}</b> <span class="muted">(${g.unit})</span></td>
+      <td class="num">${g.base}</td><td class="num">${g.min_p}</td><td class="num">${g.avg_p}</td><td class="num">${g.max_p}</td>
+      <td><a class="link" onclick="openMarket(${g.cheap_id})">${g.cheap_at}</a></td>
+      <td><a class="link" onclick="openMarket(${g.exp_id})">${g.exp_at}</a></td>
+      <td class="num">${fmtN(g.stock)}</td>
+    </tr>`).join('');
+}
+function openMarket(mid) {
+  showTab('economy');
+  loadGoods().then(() => { document.getElementById('mk-select').value = mid; loadMarket(mid); });
+}
+async function loadMarket(mid) {
+  if (!mid) return;
+  const d = await api('/api/market?id=' + mid);
+  document.getElementById('market-detail').innerHTML = `
+    <p>Держава: <a class="link" onclick="openState(${d.state})">${d.state_uk}</a> · Міст: ${d.burgs}</p>
+    <p class="muted">Шляхи: ${d.routes.map(r=>`<a class="link" onclick="loadMarket(${r.id});document.getElementById('mk-select').value=${r.id}">${r.uk}</a> (${r.dist} км, ${r.sea?'море':'суша'}, потік ${r.flow})`).join('; ')}</p>
+    <table><thead><tr><th>Товар</th><th class="num">Ціна</th><th>Монети</th><th class="num">% бази</th><th class="num">Запас</th><th class="num">Попит</th></tr></thead>
+    <tbody>${d.goods.map(g=>`<tr><td>${g.name}</td><td class="num">${g.price}</td><td>${g.coins}</td><td class="num" style="color:${g.pct>150?'var(--bad)':g.pct<70?'var(--good)':'inherit'}">${g.pct}%</td><td class="num">${g.stock}</td><td class="num">${g.want}</td></tr>`).join('')}</tbody></table>`;
+}
+
+// ---------------- ВІЙНИ, ПОХІД І ГІЛЬДІЇ
+function renderWarsAndCrusade() {
+  if (!DATA) return;
+  document.getElementById('wars-list').innerHTML = DATA.wars.length ? DATA.wars.map(wr => `
+    <div class="card" style="margin-bottom:8px;background:var(--card)">
+      <div style="display:flex;justify-content:space-between"><b>${wr.name}</b><button class="danger" onclick="gmPeace(${wr.id})">Укласти мир</button></div>
+      <div class="muted">З ${wr.since} · Рахунок: <b>${wr.score > 0 ? '+' : ''}${wr.score}</b> · Взято міст: ${wr.captured.length}</div>
+      <div>Агресори: ${wr.attackers.map(x=>x.uk).join(', ')} ↔ Захисники: ${wr.defenders.map(x=>x.uk).join(', ')}</div>
+    </div>`).join('') : '<p class="muted">На світі панує мир.</p>';
+  const cr = DATA.crusade;
+  document.getElementById('crusade-box').innerHTML = cr.phase === 'inactive'
+    ? '<p class="muted">Неактивно для завантаженої карти (сценарій належить лише світу Ферії).</p>'
+    : `<p><b>${cr.name}</b></p>
+       <p>Фаза: <span class="tag warn">${cr.phase}</span> · Готовність постачання: <b>${cr.progress}%</b> · Результат: <b>${cr.result || 'триває'}</b></p>
+       <p class="muted">Спонсори: ${cr.sponsors.join(', ')}</p>`;
+}
+async function loadGuilds() {
+  const d = await api('/api/guilds');
+  document.getElementById('guilds-box').innerHTML = `
+    <h4 style="color:var(--accent);margin-top:0">Гільдії та ордени</h4>
+    <table><thead><tr><th>Назва</th><th>Тип</th><th>База</th><th class="num">Капітал</th><th>Монополії</th></tr></thead>
+    <tbody>${d.guilds.map(g=>`<tr><td><b>${g.name}</b><div class="muted" style="font-size:11px">${g.note}</div></td><td>${g.kind}</td><td>${g.burg} (${g.state})</td><td class="num">${fmtN(g.wealth)}</td><td>${g.goods.join(', ')}</td></tr>`).join('')}</tbody></table>
+    <h4 style="color:var(--accent)">Найманці</h4>
+    <ul>${d.mercs.map(m=>`<li><b>${m.name}</b> (${m.size} ${m.unit}) — база: ${m.home}, контракт: <b>${m.employer}</b></li>`).join('')}</ul>
+    <h4 style="color:var(--accent)">Лицарські ордени</h4>
+    <ul>${d.orders.map(o=>`<li><b>${o.name}</b> (${o.strength} ${o.unit}) — ${o.state}</li>`).join('')}</ul>`;
+}
+
+// ---------------- ГМ І ЖУРНАЛ
+function populateSelects(force) {
+  if (!DATA) return;
+  const ev = document.getElementById('gm-ev-key');
+  if (force || !ev.options.length) {
+    ev.innerHTML = DATA.event_defs.map(e => `<option value="${e.key}" data-scope="${e.scope}">${e.title} (${e.scope})</option>`).join('');
+  }
+  const opts = DATA.states.slice().sort((a,b)=>a.uk.localeCompare(b.uk)).map(s=>`<option value="${s.id}">${s.uk}</option>`).join('');
+  for (const id of ['gm-war-a', 'gm-war-b', 'gm-st-id']) {
+    const el = document.getElementById(id);
+    if (force || !el.options.length) el.innerHTML = opts;
+  }
+  syncEventTargets();
+}
+
+// ---------------- ЗАВАНТАЖЕННЯ КАРТИ AZGAAR
+let _pickedFile = null;
+function openMapModal() {
+  const m = document.getElementById('map-modal');
+  m.classList.add('open');
+  document.getElementById('mp-status').textContent = '';
+  const sel = document.getElementById('mp-saved');
+  sel.innerHTML = (DATA?.saved_maps || []).map(x => `<option value="${x.path}">${x.name}${x.builtin?' (оригінал)':''}</option>`).join('') || '<option value="">Немає збережених карт</option>';
+}
+function closeMapModal() { document.getElementById('map-modal').classList.remove('open'); }
+function onMapFilePicked(file) {
+  _pickedFile = file || null;
+  document.getElementById('map-file-label').textContent = file ? `${file.name} (${(file.size/1024/1024).toFixed(2)} МБ)` : 'Файл не обрано';
+}
+(function(){
+  const dz = document.getElementById('dropzone');
+  dz.addEventListener('dragover', e => { e.preventDefault(); dz.classList.add('drag'); });
+  dz.addEventListener('dragleave', () => dz.classList.remove('drag'));
+  dz.addEventListener('drop', e => {
+    e.preventDefault(); dz.classList.remove('drag');
+    if (e.dataTransfer.files?.length) onMapFilePicked(e.dataTransfer.files[0]);
+  });
+})();
+function _readAsBase64(file) {
+  return new Promise((resolve, reject) => {
+    const r = new FileReader();
+    r.onload = () => { const res = r.result || ''; resolve(res.includes(',') ? res.split(',')[1] : ''); };
+    r.onerror = () => reject(r.error);
+    r.readAsDataURL(file);
+  });
+}
+async function submitUploadedMap() {
+  if (!_pickedFile) { toast('Оберіть файл .map або .json'); return; }
+  const btn = document.getElementById('mp-upload-btn'), st = document.getElementById('mp-status');
+  btn.disabled = true; st.textContent = 'Імпорт та калібрування економіки (~15–20 с)…';
+  try {
+    const content_b64 = await _readAsBase64(_pickedFile);
+    const res = await api('/api/upload_map', {
+      filename: _pickedFile.name,
+      content_b64,
+      year: document.getElementById('mp-year').value,
+      era: document.getElementById('mp-era').value,
+      seed: document.getElementById('mp-seed').value,
+    });
+    if (res.error) { st.textContent = res.error; toast(res.error); }
+    else { GEO.ready = false; window._dndInited = false; window._activeRoute = null; toast(res.message); closeMapModal(); await refresh(); }
+  } catch (ex) {
+    st.textContent = 'Помилка: ' + ex;
+  } finally { btn.disabled = false; }
+}
+async function submitSavedMap() {
+  const path = document.getElementById('mp-saved').value;
+  if (!path) return;
+  const st = document.getElementById('mp-status');
+  st.textContent = 'Імпорт та калібрування економіки (~15–20 с)…';
+  const res = await api('/api/switch_map', {
+    path,
+    year: document.getElementById('mp-year').value,
+    era: document.getElementById('mp-era').value,
+    seed: document.getElementById('mp-seed').value,
+  });
+  if (res.error) { st.textContent = res.error; toast(res.error); }
+  else { GEO.ready = false; window._dndInited = false; window._activeRoute = null; toast(res.message); closeMapModal(); await refresh(); }
+}
+function syncEventTargets() {
+  const ev = document.getElementById('gm-ev-key');
+  const scope = ev.options[ev.selectedIndex]?.dataset?.scope;
+  const tgt = document.getElementById('gm-ev-tgt');
+  let html = '<option value="auto">Випадкова ціль</option>';
+  if (scope === 'state') html += DATA.states.slice().sort((a,b)=>a.uk.localeCompare(b.uk)).map(s=>`<option value="${s.id}">${s.uk}</option>`).join('');
+  else if (scope === 'market') html += DATA.markets.slice().sort((a,b)=>a.uk.localeCompare(b.uk)).map(m=>`<option value="${m.id}">${m.uk}</option>`).join('');
+  else if (scope === 'burg') html += DATA.burgs.slice().sort((a,b)=>b.pop-a.pop).slice(0,120).map(b=>`<option value="${b.id}">${b.uk}</option>`).join('');
+  tgt.innerHTML = html;
+}
+async function gmFire() {
+  const res = await api('/api/fire', {
+    key: document.getElementById('gm-ev-key').value,
+    target: document.getElementById('gm-ev-tgt').value,
+    sev: document.getElementById('gm-ev-sev').value,
+  });
+  toast(res.message || res.error); await refresh();
+}
+async function gmDeclareWar() {
+  const res = await api('/api/declare', { a: document.getElementById('gm-war-a').value, b: document.getElementById('gm-war-b').value });
+  toast(res.message || res.error); await refresh();
+}
+async function gmPeace(wid) {
+  const res = await api('/api/peace', { war_id: wid });
+  toast(res.message || res.error); await refresh();
+}
+async function gmSetState() {
+  const res = await api('/api/set_state', {
+    id: document.getElementById('gm-st-id').value,
+    field: document.getElementById('gm-st-field').value,
+    value: document.getElementById('gm-st-val').value,
+  });
+  toast(res.message || res.error); await refresh();
+}
+async function loadJournal() {
+  const k = document.getElementById('j-kind').value, q = document.getElementById('j-q').value;
+  const res = await api(`/api/journal?kind=${encodeURIComponent(k)}&q=${encodeURIComponent(q)}`);
+  document.getElementById('journal-full').innerHTML = res.rows.map(r =>
+    `<div style="padding:4px 0;border-bottom:1px solid var(--border)"><span class="tag">${r.kind}</span> <span class="muted">${r.m}/${r.y}</span> ${r.text}</div>`
+  ).join('');
+}
+
+// ---------------- D&D СТІЛ (ЦІНИ, МАРШРУТИ, КВЕСТИ)
+function initDndTab() {
+  if (!DATA) return;
+  if (!window._dndInited) {
+    const stMap = new Map(DATA.states.map(s => [s.id, s.uk]));
+    window._dndSortedBurgs = DATA.burgs.slice()
+      .sort((a, b) => (b.cap - a.cap) || (b.pop - a.pop))
+      .map(b => ({ id: b.id, label: `${b.uk}${b.cap?' ★':''}${b.port?' ⚓':''} (${stMap.get(b.state) || ''})`, raw: (b.uk + ' ' + (b.name || '')).toLowerCase() }));
+    fillCitySelect('dnd-retail-burg', '');
+    fillCitySelect('rt-from', '');
+    fillCitySelect('rt-to', '');
+    if (window._dndSortedBurgs.length > 1) {
+      document.getElementById('rt-to').value = window._dndSortedBurgs[1].id;
+    }
+    const qSel = document.getElementById('dnd-quest-state');
+    qSel.innerHTML = '<option value="">Усі держави</option>' +
+      DATA.states.slice().sort((a, b) => a.uk.localeCompare(b.uk)).map(s => `<option value="${s.id}">${s.uk}</option>`).join('');
+    window._dndInited = true;
+  }
+  const rb = document.getElementById('dnd-retail-burg').value;
+  if (rb) loadRetail(rb);
+  loadQuests();
+}
+function fillCitySelect(selId, q) {
+  const sel = document.getElementById(selId);
+  const prev = sel.value;
+  const ql = (q || '').toLowerCase();
+  const list = ql ? window._dndSortedBurgs.filter(b => b.raw.includes(ql) || b.label.toLowerCase().includes(ql)) : window._dndSortedBurgs;
+  sel.innerHTML = list.slice(0, 250).map(b => `<option value="${b.id}">${escHtml(b.label)}</option>`).join('');
+  if (prev && list.some(b => String(b.id) === String(prev))) sel.value = prev;
+}
+function filterCitySelect(inputId, selId) {
+  fillCitySelect(selId, document.getElementById(inputId).value);
+  if (selId === 'dnd-retail-burg' && document.getElementById(selId).value) loadRetail(document.getElementById(selId).value);
+}
+async function loadRetail(bid) {
+  if (!bid) return;
+  const d = await api('/api/retail?burg=' + bid);
+  if (d.error) { toast(d.error); return; }
+  window._retailData = d;
+  const catSel = document.getElementById('dnd-retail-cat');
+  const prev = catSel.value;
+  catSel.innerHTML = '<option value="">Усі категорії</option>' + d.categories.map(c => `<option value="${c}">${c}</option>`).join('');
+  if (d.categories.includes(prev)) catSel.value = prev;
+  const m = d.modifiers;
+  const flags = [`${d.state_uk}`, `податок ${m.tax_pct}%`, `їжа ${m.food_index}x`];
+  if (m.is_capital) flags.push('столиця (+6%)');
+  if (m.in_war) flags.push('війна (зброя +20%)');
+  if (m.black_rust) flags.push('⚠ Чорна Іржа (+65%)');
+  document.getElementById('dnd-retail-mods').textContent = flags.join(' · ');
+  renderRetailTable();
+}
+function renderRetailTable() {
+  const d = window._retailData;
+  if (!d) return;
+  const cat = document.getElementById('dnd-retail-cat').value;
+  const rows = d.items.filter(it => !cat || it.cat === cat);
+  document.getElementById('dnd-retail-tbody').innerHTML = rows.map(it => {
+    const cls = it.pct >= 210 ? 'bad' : it.pct >= 140 ? 'warn' : it.pct <= 75 ? 'good' : '';
+    return `<tr><td><b>${escHtml(it.name)}</b></td><td class="muted">${it.cat}</td><td class="num"><b>${it.coins}</b></td><td class="num">${it.pct}%</td><td><span class="tag ${cls}">${it.status}</span></td></tr>`;
+  }).join('');
+}
+async function renameSelectedRetailCity() {
+  const bid = document.getElementById('dnd-retail-burg').value;
+  const d = window._retailData;
+  if (!bid || !d) return;
+  const uk = prompt(`Нова українська назва для міста «${d.burg_uk}»:`, d.burg_uk);
+  if (!uk || uk.trim() === d.burg_uk) return;
+  const res = await api('/api/override', { kind: 'burg', id: bid, fields: { uk: uk.trim() } });
+  toast(res.message || res.error);
+  window._dndInited = false;
+  await refresh();
+  initDndTab();
+  document.getElementById('dnd-retail-burg').value = bid;
+  loadRetail(bid);
+}
+async function calcTravelRoute() {
+  const fromId = document.getElementById('rt-from').value;
+  const toId = document.getElementById('rt-to').value;
+  const mode = document.getElementById('rt-mode').value;
+  const r = await api(`/api/route?from=${fromId}&to=${toId}&mode=${encodeURIComponent(mode)}`);
+  if (r.error) { toast(r.error); return; }
+  window._activeRoute = r;
+  drawMap();
+  const dCls = r.danger_score >= 70 ? 'bad' : r.danger_score >= 25 ? 'warn' : 'good';
+  document.getElementById('rt-result').innerHTML = `
+    <div style="margin-bottom:8px">
+      <b>${escHtml(r.from_uk)} → ${escHtml(r.to_uk)}</b> (${r.mode_name}) ·
+      <a class="link" onclick="showTab('overview');resetView()">Показати на карті</a>
+    </div>
+    <div class="grid g4" style="margin-bottom:8px">
+      <div class="pill">Відстань: <b>${r.total_km} км</b></div>
+      <div class="pill">Час: <b>${r.total_days} дн.</b></div>
+      <div class="pill">Витрати: <b>${r.cost_coins}</b></div>
+      <div class="pill">Ризик: <span class="tag ${dCls}">${r.danger_score}/100 (${r.danger_level})</span></div>
+    </div>
+    <div style="margin-bottom:6px"><b>Відрізки:</b> ${r.legs.map(l => `${escHtml(l.from_name)} → ${escHtml(l.to_name)} (${l.dist_km} км, ${l.days} дн., ${l.sea?'море':'суша'})`).join(' · ') || 'На місці'}</div>
+    <div style="margin-bottom:6px"><b>Загрози:</b> ${r.hazards.length ? r.hazards.map(h => `<div>• ${escHtml(h)}</div>`).join('') : '<span class="muted">Спокійний шлях</span>'}</div>
+    <div><b>D&D-зустрічі:</b> ${r.encounters.map(e => `<div>★ ${escHtml(e)}</div>`).join('')}</div>`;
+}
+function clearRouteOverlay() {
+  window._activeRoute = null;
+  drawMap();
+  toast('Маршрут прибрано з карти');
+}
+async function loadQuests() {
+  const sid = document.getElementById('dnd-quest-state').value;
+  const res = await api('/api/quests' + (sid ? ('?state=' + sid) : ''));
+  document.getElementById('dnd-quests-box').innerHTML = (res.quests || []).map(q => `
+    <div style="padding:6px 0;border-bottom:1px solid var(--border)">
+      <div><span class="tag warn">${escHtml(q.category)}</span> <b>${escHtml(q.title)}</b> · <span class="tag good">${escHtml(q.reward)}</span></div>
+      <div class="muted" style="font-size:12px">Замовник: ${escHtml(q.patron)} · ${escHtml(q.urgency)}</div>
+      <div>${escHtml(q.text)}</div>
+    </div>`).join('');
+}
+
+// ---------------- СЛОТИ ЗБЕРЕЖЕНЬ
+function openSlotsModal() {
+  document.getElementById('slots-modal').classList.add('open');
+  renderSlotsList(DATA?.slots || []);
+}
+function closeSlotsModal() { document.getElementById('slots-modal').classList.remove('open'); }
+function renderSlotsList(slots) {
+  const box = document.getElementById('slots-list');
+  if (!slots.length) { box.innerHTML = '<p class="muted">Збережених слотів поки немає.</p>'; return; }
+  box.innerHTML = slots.map(s => `
+    <div style="display:flex;justify-content:space-between;align-items:center;padding:8px;border-bottom:1px solid var(--border);gap:8px">
+      <div><b>${escHtml(s.name)}</b><div class="muted" style="font-size:12px">${escHtml(s.world_name)} · ${escHtml(s.date)} · ${fmtN(s.pop)} жит. · ${s.saved_at}</div></div>
+      <span class="row" style="margin:0"><button class="primary" onclick="loadSlot('${escHtml(s.id)}')">Завантажити</button><button class="danger" onclick="deleteSlot('${escHtml(s.id)}')">✕</button></span>
+    </div>`).join('');
+}
+async function saveNewSlot() {
+  const name = document.getElementById('slot-name').value;
+  const res = await api('/api/save_slot', { name });
+  if (res.error) { toast(res.error); return; }
+  document.getElementById('slot-name').value = '';
+  renderSlotsList(res.slots || []);
+  toast(res.message);
+  await refresh();
+}
+async function loadSlot(id) {
+  const res = await api('/api/load_slot', { id });
+  if (res.error) { toast(res.error); return; }
+  closeSlotsModal();
+  window._dndInited = false;
+  GEO.ready = false;
+  await refresh();
+  toast(res.message);
+}
+async function deleteSlot(id) {
+  const res = await api('/api/delete_slot', { id });
+  if (res.error) { toast(res.error); return; }
+  renderSlotsList(res.slots || []);
+  toast(res.message);
+  await refresh();
+}
+
+initMapEvents();
+refresh();
+</script>
+</body>
+</html>
