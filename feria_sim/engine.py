@@ -315,48 +315,47 @@ class Sim:
                     tariff = 0.3
                 else:
                     tariff = f
-            if tmult <= 0.001:
-                continue
-            seaf = 0.45 if e["sea"] else 1.0
-            for src, dst, ms, md, sd in ((e["a"], e["b"], ma, mb, sb), (e["b"], e["a"], mb, ma, sa)):
-                moved_edge = 0.0
-                for g, ps in ms["price"].items():
-                    pd = md["price"].get(g)
-                    if pd is None:
-                        continue
-                    gd = self.goods[g]
-                    bulk = 1.0
-                    for tg in gd["tags"]:
-                        if tg in LD.BULKY_TAGS:
-                            bulk = max(bulk, LD.BULKY_TAGS[tg]) if LD.BULKY_TAGS[tg] > 1 else min(bulk, LD.BULKY_TAGS[tg])
-                    cost = math.sqrt(max(gd["value"], 0.5)) * rate * (e["dist"] / 100.0) * bulk * seaf
-                    margin = pd * (1 - tariff) - ps - cost
-                    if margin <= 0:
-                        continue
-                    avail = ms["stock"].get(g, 0.0)
-                    if avail <= 0.5:
-                        continue
-                    # попит у кінці маршруту обмежує потік
-                    dem = md.get("want", {}).get(g, 0.0)
-                    room = max(dem * 2.5 - md["stock"].get(g, 0.0), dem * 0.3)
-                    qty = min(avail * 0.28, room if dem > 0 else avail * 0.05) * clamp(margin / max(ps, 0.01), 0.05, 1.0) * tmult
-                    if qty <= 0.05:
-                        continue
-                    loss = 0.01 + (0.02 if "food" in gd["tags"] else 0.0) * (e["dist"] / 300.0)
-                    ms["stock"][g] -= qty
-                    md["stock"][g] = md["stock"].get(g, 0.0) + qty * (1 - loss)
-                    val = qty * ps
-                    self.acc["tariff"][sd] += qty * pd * tariff * 0.6
-                    self.acc["trade_val"][sd] += val
-                    self.acc["export_val"][self.market_state[src]] += val
-                    self.acc["import_val"][sd] += val
-                    prof = qty * margin
-                    ms["capital"] = ms.get("capital", 0.0) + prof * 0.5
-                    md["capital"] = md.get("capital", 0.0) + prof * 0.5
-                    moved_edge += val
-                    key = (sa, sb) if src == e["a"] else (sb, sa)
-                    self.acc["trade_edge"][key] += val
-                e["flow"] = round(0.7 * e.get("flow", 0.0) + 0.3 * moved_edge, 2)
+            moved_edge = 0.0
+            if tmult > 0.001:
+                seaf = 0.45 if e["sea"] else 1.0
+                for src, dst, ms, md, sd in ((e["a"], e["b"], ma, mb, sb), (e["b"], e["a"], mb, ma, sa)):
+                    for g, ps in ms["price"].items():
+                        pd = md["price"].get(g)
+                        if pd is None:
+                            continue
+                        gd = self.goods[g]
+                        bulk = 1.0
+                        for tg in gd["tags"]:
+                            if tg in LD.BULKY_TAGS:
+                                bulk = max(bulk, LD.BULKY_TAGS[tg]) if LD.BULKY_TAGS[tg] > 1 else min(bulk, LD.BULKY_TAGS[tg])
+                        cost = math.sqrt(max(gd["value"], 0.5)) * rate * (e["dist"] / 100.0) * bulk * seaf
+                        margin = pd * (1 - tariff) - ps - cost
+                        if margin <= 0:
+                            continue
+                        avail = ms["stock"].get(g, 0.0)
+                        if avail <= 0.5:
+                            continue
+                        # попит у кінці маршруту обмежує потік
+                        dem = md.get("want", {}).get(g, 0.0)
+                        room = max(dem * 2.5 - md["stock"].get(g, 0.0), dem * 0.3)
+                        qty = min(avail * 0.28, room if dem > 0 else avail * 0.05) * clamp(margin / max(ps, 0.01), 0.05, 1.0) * tmult
+                        if qty <= 0.05:
+                            continue
+                        loss = 0.01 + (0.02 if "food" in gd["tags"] else 0.0) * (e["dist"] / 300.0)
+                        ms["stock"][g] -= qty
+                        md["stock"][g] = md["stock"].get(g, 0.0) + qty * (1 - loss)
+                        val = qty * ps
+                        self.acc["tariff"][sd] += qty * pd * tariff * 0.6
+                        self.acc["trade_val"][sd] += val
+                        self.acc["export_val"][self.market_state[src]] += val
+                        self.acc["import_val"][sd] += val
+                        prof = qty * margin
+                        ms["capital"] = ms.get("capital", 0.0) + prof * 0.5
+                        md["capital"] = md.get("capital", 0.0) + prof * 0.5
+                        moved_edge += val
+                        key = (sa, sb) if src == e["a"] else (sb, sa)
+                        self.acc["trade_edge"][key] += val
+            e["flow"] = round(0.7 * e.get("flow", 0.0) + 0.3 * moved_edge, 2)
 
     def trade_friction(self, a, b):
         """Мито між державами або None, якщо торгівля заборонена (війна/ембарго)."""

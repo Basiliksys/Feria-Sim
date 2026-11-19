@@ -326,6 +326,19 @@ class TestFeriaSim(unittest.TestCase):
             pop_end = sum(b["pop"] + b["rural"] for b in sim.burgs.values())
             self.assertGreaterEqual(pop_end, pop0 * 0.98)
 
+    def test_trade_flow_symmetry(self):
+        with tempfile.TemporaryDirectory() as td:
+            _, wpath, _, _, sim1 = _build_calibrated_test_world(td, seed=1)
+            sim2 = E.Sim(E.load_world(wpath), seed=1)
+            for e in sim2.edges:
+                e["a"], e["b"] = e["b"], e["a"]
+            sim1.tick(politics=False, events=False, advance=False, finance=False)
+            sim2.tick(politics=False, events=False, advance=False, finance=False)
+            flows1 = sorted(e["flow"] for e in sim1.edges)
+            flows2 = sorted(e["flow"] for e in sim2.edges)
+            for f1, f2 in zip(flows1, flows2):
+                self.assertAlmostEqual(f1, f2, places=2)
+
 
 if __name__ == "__main__":
     unittest.main()
