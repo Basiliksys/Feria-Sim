@@ -87,6 +87,17 @@ def find_good(q):
     sys.exit(f"Товар «{q}» не знайдено")
 
 
+def find_province(sim, q):
+    ql = q.lower()
+    for pid, pr in sim.provinces.items():
+        if ql in (pr["uk"].lower(), pr["name"].lower(), str(pid)):
+            return pid
+    for pid, pr in sim.provinces.items():
+        if ql in pr["uk"].lower() or ql in pr["name"].lower():
+            return pid
+    sys.exit(f"Провінцію «{q}» не знайдено")
+
+
 def cmd_init(a):
     t = time.time()
     src = a.map or DEFAULT_MAP
@@ -303,6 +314,12 @@ def cmd_undo(a):
     print(f"{res['message']} (поточна дата: {ov['date']})")
 
 
+def cmd_province(a):
+    sim = _load_sim()
+    pid = find_province(sim, a.name)
+    print(RP.province_text(sim, pid))
+
+
 def main(argv=None):
     p = argparse.ArgumentParser(prog="feria_sim", description="Симуляція економіки та подій світу Ферії")
     sp = p.add_subparsers(dest="cmd", required=True)
@@ -338,6 +355,7 @@ def main(argv=None):
     s = sp.add_parser("quests", help="Квестові гачки з поточних подій світу")
     s.add_argument("--state", default=None); s.set_defaults(f=cmd_quests)
     s = sp.add_parser("undo", help="Відкотити останній крок симуляції"); s.set_defaults(f=cmd_undo)
+    s = sp.add_parser("province", help="Паспорт провінції, її лор та намісник"); s.add_argument("name"); s.set_defaults(f=cmd_province)
     a = p.parse_args(argv)
     a.f(a)
 

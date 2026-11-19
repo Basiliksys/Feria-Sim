@@ -506,6 +506,102 @@ DIPLO_LABEL_UK = {
     "Enemy": "Вороги", "Suzerain": "Сюзерен", "Vassal": "Васал",
 }
 
+PROVINCE_FORM_UK = {
+    "County": "Графство", "Earldom": "Ярлство", "Barony": "Баронство",
+    "Margrave": "Маркграфство", "Parish": "Парафія", "Canton": "Кантон",
+    "Prefecture": "Префектура", "Territory": "Територія", "Shire": "Шир",
+    "Captaincy": "Капітанство", "Region": "Край", "Department": "Департамент",
+    "Island": "Острівне намісництво", "Colony": "Колонія", "Tribe": "Племінний округ",
+    "Clan": "Клановий уділ", "Seneschalty": "Сенешальство", "Islands": "Архіпелаг",
+    "Land": "Земля", "Area": "Округ", "Deanery": "Деканат", "Province": "Провінція",
+    "Republic": "Автономна республіка", "Landgrave": "Ландграфство",
+    "Governorate": "Губернаторство", "District": "Дистрикт",
+    "Dependency": "Підлегле володіння", "State": "Уділ", "Council": "Рада",
+    "Zone": "Зона", "Capital": "Столичний округ",
+}
+
+GOVERNOR_TITLE = {
+    "Графство": "Граф", "Ярлство": "Ярл", "Баронство": "Барон",
+    "Маркграфство": "Маркграф", "Парафія": "Прелат", "Кантон": "Консул",
+    "Префектура": "Префект", "Територія": "Намісник", "Шир": "Шериф",
+    "Капітанство": "Капітан-намісник", "Край": "Воєвода", "Департамент": "Інтендант",
+    "Острівне намісництво": "Адмірал-намісник", "Колонія": "Губернатор колонії",
+    "Племінний округ": "Вождь", "Клановий уділ": "Старійшина клану",
+    "Сенешальство": "Сенешаль", "Архіпелаг": "Капітан островів",
+    "Земля": "Каштелян", "Округ": "Староста", "Деканат": "Декан",
+    "Провінція": "Проконсул", "Автономна республіка": "Синдик",
+    "Ландграфство": "Ландграф", "Губернаторство": "Губернатор",
+    "Дистрикт": "Комісар", "Підлегле володіння": "Протектор",
+    "Уділ": "Князь-намісник", "Рада": "Голова ради", "Зона": "Комендант",
+    "Столичний округ": "Лорд-мер",
+}
+
+GOVERNOR_TRAITS = {
+    "wise_steward":      dict(prod=1.10, tax=1.05, siege_def=1.00, loyalty_drift=0.25, label="Мудрий управитель"),
+    "iron_commander":    dict(prod=0.98, tax=1.00, siege_def=1.45, loyalty_drift=0.15, label="Залізний комендант"),
+    "corrupt_collector": dict(prod=0.95, tax=0.80, siege_def=0.90, loyalty_drift=-0.20, label="Корумпований митник"),
+    "guild_patron":      dict(prod=1.12, tax=1.05, siege_def=1.00, loyalty_drift=0.10, label="Покровитель цехів"),
+    "separatist":        dict(prod=1.00, tax=0.88, siege_def=0.85, loyalty_drift=-0.55, label="Амбітний сепаратист"),
+    "inquisitor":        dict(prod=0.97, tax=1.06, siege_def=1.20, loyalty_drift=0.20, label="Ревний інквізитор"),
+}
+
+_TINCTURE_UK = {
+    "gules": "червленому", "azure": "лазуровому", "or": "золотому",
+    "argent": "срібному", "sable": "чорному", "vert": "зеленому",
+    "purpure": "пурпуровому", "tenne": "рудому", "murrey": "багряному",
+}
+_TINCTURE_ADJ = {
+    "gules": "червлений", "azure": "лазуровий", "or": "золотий",
+    "argent": "срібний", "sable": "чорний", "vert": "зелений",
+    "purpure": "пурпуровий", "tenne": "рудий", "murrey": "багряний",
+}
+_SHIELD_UK = {
+    "heater": "класичному щиті", "pavise": "павізькому щиті", "round": "круглому щиті",
+    "spanish": "іспанському щиті", "french": "французькому щиті", "polish": "польському щиті",
+    "oval": "овальному щиті", "erebor": "гранованому щиті", "swiss": "швейцарському щиті",
+    "wedge": "клиноподібному щиті", "horsehead": "фігурному щиті",
+}
+_CHARGE_UK = [
+    ("griffin", "грифон"), ("lion", "лев"), ("eagle", "орел"), ("dragon", "дракон"),
+    ("sword", "меч"), ("axe", "сокира"), ("tower", "вежа"), ("castle", "замок"),
+    ("crown", "корона"), ("cross", "хрест"), ("salmon", "лосось"), ("fish", "риба"),
+    ("tree", "дерево"), ("oak", "дуб"), ("horse", "кінь"), ("unicorn", "єдиноріг"),
+    ("ship", "корабель"), ("anchor", "якір"), ("star", "зірка"), ("sun", "сонце"),
+    ("moon", "півмісяць"), ("wolf", "вовк"), ("bear", "ведмідь"), ("boar", "вепр"),
+    ("stag", "олень"), ("falcon", "сокіл"), ("raven", "ворон"), ("swan", "лебідь"),
+    ("rose", "троянда"), ("fleur", "лілія"), ("key", "ключ"), ("bell", "дзвін"),
+    ("buckle", "пряжка"), ("lozenge", "ромб"), ("chalice", "чаша"), ("book", "книга"),
+]
+
+
+def blazon_coa(coa) -> str:
+    """Формує читабельний український геральдичний опис (блазон) із `coa` Azgaar."""
+    if not isinstance(coa, dict) or not coa:
+        return "Простий прапор без геральдичного щита"
+    t1 = _TINCTURE_UK.get(coa.get("t1", ""), "темному")
+    sh = _SHIELD_UK.get(coa.get("shield", ""), "щиті")
+    parts = [f"На {t1} {sh}"]
+    div = coa.get("division")
+    if isinstance(div, dict) and div.get("t"):
+        parts.append(f"з поділом ({_TINCTURE_ADJ.get(div['t'], div['t'])})")
+    ords = coa.get("ordinaries") or []
+    if ords and isinstance(ords[0], dict):
+        ot = _TINCTURE_ADJ.get(ords[0].get("t", ""), "")
+        if ot:
+            parts.append(f"та фігурною смугою ({ot})")
+    charges = coa.get("charges") or []
+    ch_texts = []
+    for ch in charges[:2]:
+        if not isinstance(ch, dict) or not ch.get("charge"):
+            continue
+        raw = ch["charge"].lower()
+        name_uk = next((uk for key, uk in _CHARGE_UK if key in raw), translit(ch["charge"]).lower())
+        col = _TINCTURE_ADJ.get(ch.get("t", ""), "")
+        ch_texts.append(f"{col} {name_uk}".strip())
+    if ch_texts:
+        parts.append("— " + ", ".join(ch_texts))
+    return " ".join(parts) + "."
+
 # ----------------------------------------------------------------------------
 # Гільдії та організації зі сховища
 # ----------------------------------------------------------------------------

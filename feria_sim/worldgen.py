@@ -81,19 +81,57 @@ def _generate_generic_orgs(w, rng):
 
 def _resolve_overrides(overrides, world_name, is_feria):
     if not overrides:
-        return {}, {}
+        return {}, {}, {}
     worlds = overrides.get("worlds")
     if isinstance(worlds, dict):
         if world_name in worlds:
             src = worlds[world_name] or {}
-            return src.get("states", {}), src.get("burgs", {})
+            return src.get("states", {}), src.get("burgs", {}), src.get("provinces", {})
         if not is_feria:
-            return {}, {}
+            return {}, {}, {}
     if not is_feria and overrides.get("world_name") not in (None, world_name):
-        return {}, {}
+        return {}, {}, {}
     if not is_feria and overrides and "world_name" not in overrides and "worlds" in overrides:
-        return {}, {}
-    return overrides.get("states", {}), overrides.get("burgs", {})
+        return {}, {}, {}
+    return overrides.get("states", {}), overrides.get("burgs", {}), overrides.get("provinces", {})
+
+
+def _make_province_lore(w, p, p_burgs):
+    goods = w["goods"]
+    raw_tot = {}
+    craft_tot = {}
+    ports = walls = temples = 0
+    for b in p_burgs:
+        if b.get("port"):
+            ports += 1
+        if b.get("walls"):
+            walls += 1
+        if b.get("temple"):
+            temples += 1
+        for g, u in b.get("raw", {}).items():
+            raw_tot[g] = raw_tot.get(g, 0.0) + u * goods[g]["value"]
+        for sl in b.get("craft", []):
+            craft_tot[sl["good"]] = craft_tot.get(sl["good"], 0.0) + sl["units"] * goods[sl["good"]]["value"]
+    top_raw = [LD.good_uk(g, goods) for g, _ in sorted(raw_tot.items(), key=lambda x: -x[1])[:2]]
+    top_craft = [LD.good_uk(g, goods) for g, _ in sorted(craft_tot.items(), key=lambda x: -x[1])[:2]]
+    parts = []
+    if top_raw:
+        parts.append("Сировина: " + ", ".join(top_raw))
+    if top_craft:
+        parts.append("Ремесла: " + ", ".join(top_craft))
+    specialty = " · ".join(parts) if parts else "Змішане господарство"
+    feats = []
+    if ports:
+        feats.append("приморська торгівля" if ports == 1 else "мережа портів")
+    if walls:
+        feats.append("укріплені рубежі")
+    if temples:
+        feats.append("шановані храми")
+    cb = w["burgs"][p["burg"]]
+    lore = f"Адміністративний центр — {cb['uk']}. Головний промисел: {specialty}."
+    if feats:
+        lore += " Особливості краю: " + ", ".join(feats) + "."
+    return specialty, lore
 
 
 def build_world(imp, seed=1, overrides=None, start_year=None, era=None):
@@ -106,7 +144,7 @@ def build_world(imp, seed=1, overrides=None, start_year=None, era=None):
     matched_known = sum(1 for st in w["states"].values() if st["name"] in LD.KNOWN_STATES)
     world_name = w["meta"].get("world_name", "Feria")
     is_feria = (world_name == "Feria") or (matched_known >= 3)
-    ov_states, ov_burgs = _resolve_overrides(overrides, world_name, is_feria)
+    ov_states, ov_burgs, ov_provs = _resolve_overrides(overrides, world_name, is_feria)
 
     # ---- міста
     for b in w["burgs"].values():
@@ -115,6 +153,8 @@ def build_world(imp, seed=1, overrides=None, start_year=None, era=None):
         b["uk"] = ov_b_uk or LD.translit(b["name"])
         b["pop0"] = b["pop"] + b["rural"]
         b["sat"] = {}
+        b["core_state"] = b["state"]
+        b["occupied_by"] = None
     for m in w["markets"].values():
         m["name"] = w["burgs"][m["center"]]["name"]
         m["uk"] = w["burgs"][m["center"]]["uk"]
@@ -174,6 +214,35 @@ def build_world(imp, seed=1, overrides=None, start_year=None, era=None):
         st["mercs"] = []
         st["religion_name"] = w["religions"].get(st["religion"], {}).get("name", "—")
         st["culture_name"] = cult
+    # ---- провінції, геральдика та намісники
+    gov_pool = list(LD.GOVERNOR_TRAITS)
+    for pid, p in w.get("provinces", {}).items():
+        ov_p = ov_provs.get(str(pid))
+        ov_p_dict = ov_p if isinstance(ov_p, dict) else ({"uk": ov_p} if ov_p else {})
+        form_uk = LD.PROVINCE_FORM_UK.get(p.get("form") or "", "Провінція")
+        raw_uk = LD.translit(p["name"])
+        p["form_uk"] = form_uk
+        p["uk"] = ov_p_dict.get("uk") or (f"{form_uk} {raw_uk}" if not raw_uk.lower().startswith(form_uk.lower()) else raw_uk)
+        p["core_state"] = p["state"]
+        p["occupied_by"] = None
+        p["siege"] = 0.0
+        p["assimilation"] = 0
+        p["blazon"] = LD.blazon_coa(p.get("coa"))
+        p_burgs = [w["burgs"][bid] for bid in p.get("burgs", []) if bid in w["burgs"]]
+        specialty, lore_text = _make_province_lore(w, p, p_burgs)
+        p["specialty"] = ov_p_dict.get("specialty") or specialty
+        p["lore"] = ov_p_dict["lore"] if "lore" in ov_p_dict else lore_text
+        cb = w["burgs"][p["burg"]]
+        cult_p = cultures.get(cb.get("culture"), {}).get("name", w["states"][p["state"]]["culture_name"])
+        title = LD.GOVERNOR_TITLE.get(form_uk, "Намісник")
+        gname = ov_p_dict.get("governor") or f"{title} {_make_name(rng, cult_p)}"
+        loy = float(ov_p_dict["loyalty"]) if ov_p_dict.get("loyalty") not in (None, "") else round(rng.uniform(65, 92), 1)
+        p["governor"] = dict(
+            name=gname,
+            age=rng.randint(25, 66),
+            traits=rng.sample(gov_pool, 2),
+            loyalty=loy,
+        )
     # ---- відносини
     rel = {}
     vassals = []

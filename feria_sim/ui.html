@@ -101,11 +101,13 @@
           <span class="row" style="margin:0;font-weight:400;text-transform:none">
             <select id="map-mode" onchange="drawMap()" style="padding:4px 8px">
               <option value="political">Політична карта</option>
+              <option value="provinces">Провінції та лояльність</option>
               <option value="food">Ціни на їжу / Голод</option>
               <option value="stability">Стабільність</option>
               <option value="wealth">Багатство (ВВП)</option>
               <option value="war">Війни та епідемії</option>
             </select>
+            <label><input type="checkbox" id="chk-provs" onchange="drawMap()"> Провінції</label>
             <label><input type="checkbox" id="chk-routes" checked onchange="drawMap()"> Шляхи</label>
             <label><input type="checkbox" id="chk-labels" checked onchange="drawMap()"> Назви</label>
             <button onclick="resetView()">Скинути зум</button>
@@ -381,11 +383,21 @@
   </div>
 </div>
 
+<div id="prov-modal" class="modal-bg" onclick="if(event.target===this)closeProvModal()">
+  <div class="modal" style="width:min(760px,95vw);max-height:86vh;overflow:auto">
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">
+      <h3 id="prov-modal-title" style="margin:0;color:var(--accent)">Провінція</h3>
+      <button onclick="closeProvModal()">✕</button>
+    </div>
+    <div id="prov-modal-body"><p class="muted">Завантаження…</p></div>
+  </div>
+</div>
+
 <div id="toast" class="toast"></div>
 
 <script>
 let DATA = null;
-let GEO = { ready: false, land: [], lakes: [], states: {}, borders: [], rivers: [] };
+let GEO = { ready: false, land: [], lakes: [], states: {}, borders: [], provBorders: [], rivers: [] };
 let sortKey = 'gdp', sortDir = -1;
 let view = { x: 0, y: 0, s: 1 };
 let drag = null;
@@ -433,6 +445,7 @@ async function loadGeo() {
     land: (g.land || []).map(d => new Path2D(d)),
     lakes: (g.lakes || []).map(d => new Path2D(d)),
     borders: (g.borders || []).map(d => new Path2D(d)),
+    provBorders: (g.prov_borders || []).map(d => new Path2D(d)),
     rivers: (g.rivers || []).map(d => new Path2D(d)),
     states: {},
   };
@@ -578,7 +591,7 @@ function drawMap() {
     for (const s of DATA.states) {
       const sp = GEO.states[String(s.id)];
       if (!sp) continue;
-      ctx.globalAlpha = mode === 'political' ? 0.56 : 0.85;
+      ctx.globalAlpha = mode === 'political' ? 0.56 : (mode === 'provinces' ? 0.30 : 0.85);
       ctx.fillStyle = _stateHeatColor(s, warStates, epiStates, maxGdp, mode);
       ctx.fill(sp);
     }
@@ -591,9 +604,32 @@ function drawMap() {
     ctx.lineWidth = 1.0 / view.s;
     for (const p of GEO.rivers) ctx.stroke(p);
 
+    if ((document.getElementById('chk-provs')?.checked || mode === 'provinces') && GEO.provBorders?.length) {
+      ctx.strokeStyle = mode === 'provinces' ? 'rgba(212,166,74,0.48)' : 'rgba(255,255,255,0.16)';
+      ctx.lineWidth = (mode === 'provinces' ? 0.9 : 0.6) / view.s;
+      for (const p of GEO.provBorders) ctx.stroke(p);
+    }
+
     ctx.strokeStyle = 'rgba(255,255,255,0.28)';
     ctx.lineWidth = 1.1 / view.s;
     for (const p of GEO.borders) ctx.stroke(p);
+  }
+
+  const showProvs = mode === 'provinces' || document.getElementById('chk-provs')?.checked;
+  const provs = DATA.provinces || [];
+  const stById = new Map(DATA.states.map(s => [s.id, s]));
+  if (mode === 'provinces' && provs.length) {
+    const pr = 9.5 / Math.pow(view.s, 0.55);
+    for (const p of provs) {
+      if (p.x == null || p.y == null) continue;
+      const col = p.loyalty >= 70 ? 'rgba(63,185,80,0.45)'
+        : (p.loyalty >= 40 ? 'rgba(210,153,34,0.50)' : 'rgba(248,81,73,0.62)');
+      ctx.fillStyle = col;
+      ctx.beginPath(); ctx.arc(p.x, p.y, pr, 0, Math.PI * 2); ctx.fill();
+      ctx.strokeStyle = p.color || 'rgba(255,255,255,0.4)';
+      ctx.lineWidth = 1.0 / view.s;
+      ctx.stroke();
+    }
   }
 
   // розділювач Кірос / Турс (лише для Ферії)
@@ -653,11 +689,49 @@ function drawMap() {
     ctx.fillStyle = '#ff6b35';
     ctx.beginPath(); ctx.arc(mk.x, mk.y, 4 / view.s, 0, Math.PI * 2); ctx.fill();
   }
+  for (const p of provs) {
+    if (p.x == null || p.y == null) continue;
+    const hr = 11.5 / Math.pow(view.s, 0.55);
+    if (p.occupied_by != null) {
+      const occ = stById.get(p.occupied_by);
+      ctx.save();
+      ctx.strokeStyle = (occ && occ.color) || '#f85149';
+      ctx.lineWidth = 2.2 / view.s;
+      ctx.setLineDash([4 / view.s, 3 / view.s]);
+      ctx.beginPath(); ctx.arc(p.x, p.y, hr, 0, Math.PI * 2); ctx.stroke();
+      ctx.restore();
+      ctx.font = `${Math.max(9, 10 / view.s)}px sans-serif`;
+      ctx.fillStyle = '#ff9b8a';
+      ctx.fillText('⚔', p.x - 4 / view.s, p.y - hr - 2 / view.s);
+    } else if (p.siege > 0) {
+      ctx.save();
+      ctx.strokeStyle = '#ff6b35';
+      ctx.lineWidth = 2.0 / view.s;
+      ctx.beginPath();
+      ctx.arc(p.x, p.y, hr, -Math.PI / 2, -Math.PI / 2 + Math.PI * 2 * Math.min(1, p.siege / 100));
+      ctx.stroke();
+      ctx.restore();
+      ctx.font = `${Math.max(9, 10 / view.s)}px sans-serif`;
+      ctx.fillStyle = '#ffd166';
+      ctx.fillText('⚔', p.x - 4 / view.s, p.y - hr - 2 / view.s);
+    } else if (p.state !== p.core_state && (showProvs || mode === 'war')) {
+      ctx.strokeStyle = '#d29922';
+      ctx.lineWidth = 1.5 / view.s;
+      ctx.beginPath(); ctx.arc(p.x, p.y, hr * 0.85, 0, Math.PI * 2); ctx.stroke();
+    }
+  }
   if (document.getElementById('chk-labels').checked) {
     ctx.font = `${Math.max(10, 11 / view.s)}px sans-serif`;
     ctx.fillStyle = 'rgba(230,237,243,0.92)';
     for (const s of DATA.states) {
       if (s.gdp > 50000 || view.s > 1.3) ctx.fillText(s.uk, s.cx + 6 / view.s, s.cy - 4 / view.s);
+    }
+    if (showProvs && view.s > 1.25) {
+      ctx.font = `${Math.max(8, 9.5 / view.s)}px sans-serif`;
+      ctx.fillStyle = 'rgba(212,166,74,0.90)';
+      for (const p of provs) {
+        if (p.x != null && p.y != null) ctx.fillText(p.uk, p.x + 7 / view.s, p.y + 3 / view.s);
+      }
     }
   }
   ctx.restore();
@@ -693,11 +767,29 @@ function initMapEvents() {
     if (drag) { drag.moved = true; view.x = e.clientX - drag.x; view.y = e.clientY - drag.y; drawMap(); tip.style.display='none'; return; }
     if (!DATA) return;
     const wx = (mx - view.x) / view.s, wy = (my - view.y) / view.s;
+    const mode = document.getElementById('map-mode')?.value || 'political';
+    const provs = DATA.provinces || [];
+    if (mode === 'provinces' && provs.length) {
+      let bestP = null, bp = (16 / view.s) ** 2;
+      for (const p of provs) {
+        if (p.x == null || p.y == null) continue;
+        const d = (p.x - wx)**2 + (p.y - wy)**2;
+        if (d < bp) { bp = d; bestP = p; }
+      }
+      if (bestP) {
+        const flag = bestP.occupied_by != null ? ' · 🚩 Окуповано' : (bestP.siege > 0 ? ` · ⚔ Облога ${bestP.siege}%` : '');
+        tip.innerHTML = `<b>${escHtml(bestP.uk)}</b> (${escHtml(bestP.state_uk)})${flag}<br>Намісник: ${escHtml(bestP.governor || '—')} · Лояльність: <b>${bestP.loyalty}%</b><br><span class="muted">${escHtml(bestP.specialty || '')} · Клік — картка</span>`;
+        tip.style.left = (mx + 12) + 'px'; tip.style.top = (my + 12) + 'px'; tip.style.display = 'block';
+        return;
+      }
+    }
     let best = null, bd = (14 / view.s) ** 2;
     for (const b of DATA.burgs) { const d = (b.x - wx)**2 + (b.y - wy)**2; if (d < bd) { bd = d; best = b; } }
     if (best) {
       const st = DATA.states.find(s => s.id === best.state);
-      tip.innerHTML = `<b>${best.uk}</b> ${best.cap?'★':''}${best.port?'⚓':''}<br>${st?st.uk:''}<br>Населення: ${fmtN(best.pop)}${st?`<br>Їжа: ${st.food_idx}x · Стаб.: ${st.stab.toFixed(0)}`:''}`;
+      const pr = provs.find(p => p.burg === best.id);
+      const prTxt = pr ? `<br>Провінція: ${escHtml(pr.uk)} (${pr.loyalty}%${pr.siege > 0 ? `, облога ${pr.siege}%` : ''}${pr.occupied_by != null ? ', окуповано' : ''})` : '';
+      tip.innerHTML = `<b>${best.uk}</b> ${best.cap?'★':''}${best.port?'⚓':''}<br>${st?st.uk:''}${prTxt}<br>Населення: ${fmtN(best.pop)}${st?`<br>Їжа: ${st.food_idx}x · Стаб.: ${st.stab.toFixed(0)}`:''}`;
       tip.style.left = (mx + 12) + 'px'; tip.style.top = (my + 12) + 'px'; tip.style.display = 'block';
     } else {
       const sid = _findStateAtPoint(wx, wy);
@@ -711,6 +803,17 @@ function initMapEvents() {
   cv.addEventListener('click', e => {
     if (drag && drag.moved) return;
     const rc = cv.getBoundingClientRect(), wx = (e.clientX - rc.left - view.x) / view.s, wy = (e.clientY - rc.top - view.y) / view.s;
+    const mode = document.getElementById('map-mode')?.value || 'political';
+    const provs = DATA.provinces || [];
+    if (mode === 'provinces' && provs.length) {
+      let bestP = null, bp = (16 / view.s) ** 2;
+      for (const p of provs) {
+        if (p.x == null || p.y == null) continue;
+        const d = (p.x - wx)**2 + (p.y - wy)**2;
+        if (d < bp) { bp = d; bestP = p; }
+      }
+      if (bestP) { openProvince(bestP.id); return; }
+    }
     let best = null, bd = (16 / view.s) ** 2;
     for (const b of DATA.burgs) { const d = (b.x - wx)**2 + (b.y - wy)**2; if (d < bd) { bd = d; best = b; } }
     if (best) { openState(best.state); return; }
@@ -809,11 +912,90 @@ async function openState(sid) {
     <p><b>Склад армії:</b> ${Object.entries(d.army).map(([u,n])=>`${u}: ${n}`).join(', ')} ${d.mercs.length?(' | Найманці: '+d.mercs.join(', ')):''}</p>
     <p><b>Вороги:</b> ${d.worst.slice(0,4).map(x=>`<a class="link" onclick="openState(${x.id})">${x.uk}</a> (${x.score})`).join(', ')}</p>
     <p><b>Друзі:</b> ${d.best.slice(0,4).map(x=>`<a class="link" onclick="openState(${x.id})">${x.uk}</a> (${x.score})`).join(', ')}</p>
+    <h4 style="margin:10px 0 6px;color:var(--accent)">Провінції та намісники (${(d.provinces || []).length})</h4>
+    <div class="scroll" style="max-height:180px"><table><thead><tr><th>Провінція</th><th>Намісник</th><th class="num">Лоял.</th><th>Спеціалізація</th></tr></thead>
+      <tbody>${(d.provinces || []).map(p => {
+        const lCol = p.loyalty >= 70 ? 'var(--ok)' : (p.loyalty >= 40 ? '#d29922' : 'var(--bad)');
+        const stBadge = p.occupied_by != null ? ` <span class="tag" style="color:var(--bad)">🚩 ${escHtml(p.occupied_uk)}</span>`
+          : (p.siege > 0 ? ` <span class="tag" style="color:#ff6b35">⚔ ${p.siege}%</span>`
+          : (!p.is_core ? ` <span class="tag" style="color:#d29922">приєднана</span>` : ''));
+        return `<tr><td><a class="link" onclick="openProvince(${p.id})">${escHtml(p.uk)}</a>${stBadge}</td><td>${escHtml(p.governor)}</td><td class="num" style="color:${lCol}"><b>${p.loyalty}%</b></td><td class="muted">${escHtml(p.specialty || '')}</td></tr>`;
+      }).join('')}</tbody></table></div>
     <h4 style="margin:10px 0 6px;color:var(--accent)">Найбільші міста</h4>
     <div class="scroll" style="max-height:180px"><table><thead><tr><th>Місто</th><th class="num">Насел.</th><th>Ринок</th></tr></thead>
       <tbody>${d.cities.map(c=>`<tr><td>${escHtml(c.uk)} ${c.capital?'★':''}${c.port?'⚓':''} <a class="link" onclick="renameBurgPrompt(${c.id}, '${escHtml(c.uk)}', ${d.id})" title="Перейменувати">✏</a></td><td class="num">${fmtN(c.pop)}</td><td><a class="link" onclick="openMarket(${c.market_id})">${escHtml(c.market_uk)}</a></td></tr>`).join('')}</tbody></table></div>
     <h4 style="margin:10px 0 6px;color:var(--accent)">Хроніка</h4>
     <div class="scroll" style="max-height:160px">${d.journal.map(r=>`<div><span class="muted">${r.m}/${r.y}</span> ${r.text}</div>`).join('')}</div>`;
+}
+function closeProvModal() {
+  document.getElementById('prov-modal').style.display = 'none';
+}
+async function openProvince(pid) {
+  const modal = document.getElementById('prov-modal');
+  const body = document.getElementById('prov-modal-body');
+  const title = document.getElementById('prov-modal-title');
+  modal.style.display = 'flex';
+  title.textContent = 'Провінція';
+  body.innerHTML = '<p class="muted">Завантаження…</p>';
+  const d = await api('/api/province?id=' + pid);
+  if (d.error) { body.innerHTML = `<p style="color:var(--bad)">${escHtml(d.error)}</p>`; return; }
+  title.textContent = `${d.uk} (${d.form_uk || 'провінція'})`;
+  const gov = d.governor || {};
+  const lCol = (gov.loyalty ?? 70) >= 70 ? 'var(--ok)' : ((gov.loyalty ?? 70) >= 40 ? '#d29922' : 'var(--bad)');
+  const occTxt = d.occupied_by != null
+    ? `<span style="color:var(--bad)">Окуповано (${escHtml(d.occupied_uk || '')})</span>`
+    : (d.siege > 0 ? `<span style="color:#ff6b35">Облога ${d.siege}%</span>` : '<span style="color:var(--ok)">Під контролем</span>');
+  body.innerHTML = `
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;flex-wrap:wrap;gap:6px">
+      <div>Держава: <a class="link" onclick="closeProvModal();openState(${d.state})"><b>${escHtml(d.state_uk)}</b></a>
+        ${d.core_state !== d.state ? `· Корінна: <a class="link" onclick="closeProvModal();openState(${d.core_state})">${escHtml(d.core_uk)}</a> (асиміляція ${d.assimilation ?? 100}%)` : ''}
+      </div>
+      <button onclick="toggleProvEditor()">✏ Редагувати (overrides.json)</button>
+    </div>
+    <div id="prov-edit-form" style="display:none;background:var(--card);border:1px solid var(--border);border-radius:6px;padding:10px;margin-bottom:10px">
+      <div class="row">
+        <label style="flex:1">Назва (укр.): <input id="ov-pr-uk" value="${escHtml(d.uk)}" style="width:100%"></label>
+        <label style="flex:1">Намісник: <input id="ov-pr-gov" value="${escHtml(gov.name || '')}" style="width:100%"></label>
+      </div>
+      <div class="row">
+        <label style="flex:1">Лояльність (0–100): <input id="ov-pr-loy" type="number" min="0" max="100" value="${gov.loyalty ?? 70}" style="width:100%"></label>
+        <label style="flex:2">Спеціалізація: <input id="ov-pr-spec" value="${escHtml(d.specialty || '')}" style="width:100%"></label>
+      </div>
+      <div class="row"><label style="width:100%">Лор / примітка:<textarea id="ov-pr-lore" rows="2" style="width:100%;background:var(--panel);color:var(--text);border:1px solid var(--border);border-radius:6px;padding:6px">${escHtml(d.lore || '')}</textarea></label></div>
+      <div class="row" style="margin-bottom:0"><button class="primary" onclick="saveProvOverride(${d.id})">Зберегти в overrides.json</button><button onclick="toggleProvEditor()">Скасувати</button></div>
+    </div>
+    <div class="grid g3" style="margin:8px 0">
+      <div class="pill">Центр: <b>${escHtml(d.burg_uk || '—')}</b></div>
+      <div class="pill">Населення: <b>${fmtN(d.pop)}</b></div>
+      <div class="pill">Статус: <b>${occTxt}</b></div>
+    </div>
+    <p><b>Намісник:</b> ${escHtml(gov.name || '—')} ${gov.age ? `(${gov.age} р.)` : ''} · Лояльність: <b style="color:${lCol}">${gov.loyalty ?? 0}%</b>${(gov.traits || []).length ? ` — ${escHtml(gov.traits.join(', '))}` : ''}</p>
+    <p><b>Спеціалізація:</b> ${escHtml(d.specialty || '—')}</p>
+    <p><b>Герб:</b> ${escHtml(d.blazon || '—')}</p>
+    ${d.lore ? `<p class="muted">${escHtml(d.lore)}</p>` : ''}
+    <h4 style="margin:10px 0 6px;color:var(--accent)">Міста провінції (${(d.cities || []).length})</h4>
+    <div class="scroll" style="max-height:170px"><table><thead><tr><th>Місто</th><th class="num">Насел.</th><th>Ринок</th></tr></thead>
+      <tbody>${(d.cities || []).map(c => `<tr><td>${escHtml(c.uk)} ${c.capital ? '★' : ''}${c.port ? '⚓' : ''}${c.walls ? '🛡' : ''}</td><td class="num">${fmtN(c.pop)}</td><td>${c.market_id != null ? `<a class="link" onclick="closeProvModal();openMarket(${c.market_id})">${escHtml(c.market_uk)}</a>` : '—'}</td></tr>`).join('')}</tbody></table></div>`;
+}
+function toggleProvEditor() {
+  const f = document.getElementById('prov-edit-form');
+  if (f) f.style.display = f.style.display === 'none' ? 'block' : 'none';
+}
+async function saveProvOverride(pid) {
+  const res = await api('/api/override', {
+    kind: 'province',
+    id: pid,
+    fields: {
+      uk: document.getElementById('ov-pr-uk').value,
+      governor: document.getElementById('ov-pr-gov').value,
+      loyalty: Number(document.getElementById('ov-pr-loy').value),
+      specialty: document.getElementById('ov-pr-spec').value,
+      lore: document.getElementById('ov-pr-lore').value,
+    }
+  });
+  toast(res.message || res.error);
+  await refresh();
+  await openProvince(pid);
 }
 function toggleStateEditor() {
   const f = document.getElementById('state-edit-form');

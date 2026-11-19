@@ -414,6 +414,20 @@ def generate_quest_hooks(sim, state_id=None, limit=10):
                 return True
         return False
 
+    def _gov_for_target(tgt_name, ev_states):
+        for b in sim.burgs.values():
+            if b["uk"] == tgt_name or sim.markets[b["market"]]["uk"] == tgt_name:
+                pr = sim.provinces.get(b.get("province"))
+                if pr and pr.get("governor"):
+                    return f"{pr['governor']['name']} ({pr['uk']})"
+        for sid in (ev_states or []):
+            pids = sim.state_provinces.get(sid, [])
+            if pids:
+                pr = sim.provinces[pids[0]]
+                if pr.get("governor"):
+                    return f"{pr['governor']['name']} ({pr['uk']})"
+        return None
+
     # 1. Активні події
     ev_patrons = {
         "mine_collapse": ("Гільдія рудокопів", "Економіка", "Врятувати заблокованих гірників та зачистити новий обвал тунелю"),
@@ -438,6 +452,9 @@ def generate_quest_hooks(sim, state_id=None, limit=10):
         patron, cat, summary = ev_patrons.get(
             ev["key"], ("Місцева влада", "Пригода", f"Допомогти містянам подолати наслідки події «{ev['title']}»")
         )
+        gov_patron = _gov_for_target(tgt, ev.get("states"))
+        if gov_patron and ev["key"] in ("monster_horde", "dragon_attack", "undead_incursion", "peasant_revolt", "bandit_roads", "dungeon_breach"):
+            patron = gov_patron
         reward_zm = 60 * sev + (40 if ev["key"] in ("dragon_attack", "undead_incursion", "black_rust") else 0)
         hooks.append(dict(
             title=f"{ev['title']}: {tgt}",
@@ -449,6 +466,47 @@ def generate_quest_hooks(sim, state_id=None, limit=10):
             urgency=f"Ступінь {sev}",
             text=f"{summary}. Привід: {ev['text']}",
         ))
+
+    # 1б. Облоги, окупація провінцій і змови нелояльних намісників
+    for pid, pr in sim.provinces.items():
+        sid = pr["state"]
+        occ = pr.get("occupied_by")
+        if sid_filter is not None and sid != sid_filter and occ != sid_filter:
+            continue
+        gov = pr.get("governor") or {}
+        if pr.get("siege", 0.0) > 0:
+            hooks.append(dict(
+                title=f"Прорив облоги: {pr['uk']}",
+                category="Війна",
+                location=sim.bname(pr.get("burg")),
+                state_uk=sim.sname(sid),
+                patron=f"{gov.get('name', 'Комендант')} ({pr['uk']})",
+                reward="180 зм",
+                urgency=f"Облога {pr['siege']:.0f}%",
+                text=f"Ворог тримає в облозі {sim.bname(pr.get('burg'))}, столицю провінції {pr['uk']}. Потрібен прорив блокади або вилазка проти облогової артилерії.",
+            ))
+        elif occ:
+            hooks.append(dict(
+                title=f"Підпілля в окупованій провінції {pr['uk']}",
+                category="Війна",
+                location=pr["uk"],
+                state_uk=sim.sname(sid),
+                patron=f"Лоялісти ({sim.sname(sid)})",
+                reward="160 зм",
+                urgency="Окупація",
+                text=f"Провінція {pr['uk']} окупована силами {sim.sname(occ)}. Місцеві повстанці шукають допомоги для диверсії або порятунку полоненого намісника.",
+            ))
+        elif gov.get("loyalty", 70.0) < 35.0:
+            hooks.append(dict(
+                title=f"Змова намісника: {pr['uk']}",
+                category="Інтрига",
+                location=sim.bname(pr.get("burg")),
+                state_uk=sim.sname(sid),
+                patron=f"Таємна канцелярія ({sim.sname(sid)})",
+                reward="130 зм",
+                urgency=f"Лояльність {gov.get('loyalty', 0):.0f}%",
+                text=f"{gov.get('name', 'Намісник')} підозрюється в сепаратизмі й таємних перемовинах. Партія може викрити змову — або стати на бік заколотників.",
+            ))
 
     # 2. Війни
     for wr in sim.w.get("wars", []):

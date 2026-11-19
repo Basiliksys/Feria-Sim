@@ -4,13 +4,14 @@ import gzip
 import json
 import math
 import os
+import random
 import shutil
 import tempfile
 import threading
 import unittest
 import urllib.request
 
-from feria_sim import cli, dnd_tools as DT, engine as E, events as EV, importer as IM, web, worldgen as WG
+from feria_sim import cli, dnd_tools as DT, engine as E, events as EV, importer as IM, politics as PO, report as RP, web, worldgen as WG
 
 
 def _sample_vanilla_map_lines(with_svg=True):
@@ -338,6 +339,118 @@ class TestFeriaSim(unittest.TestCase):
             flows2 = sorted(e["flow"] for e in sim2.edges)
             for f1, f2 in zip(flows1, flows2):
                 self.assertAlmostEqual(f1, f2, places=2)
+
+    def test_provinces_governors_and_territorial_war(self):
+        with tempfile.TemporaryDirectory() as td:
+            # 1) Автостворення провінцій для карти без provinces_raw + перевірка відсутності втрачених міст
+            _, wpath, jpath, gpath, sim_auto = _build_calibrated_test_world(td, seed=5)
+            self.assertGreaterEqual(len(sim_auto.provinces), 2)
+            for b in sim_auto.burgs.values():
+                self.assertIn(b.get("province"), sim_auto.provinces)
+            with open(gpath, encoding="utf-8") as f:
+                geo_auto = json.load(f)
+            self.assertIn("prov_borders", geo_auto)
+
+            # 2) Карта з явними провінціями, гербами coa та provinceBorders у SVG
+            lines = _sample_vanilla_map_lines(with_svg=True).splitlines()
+            lines[7] = (
+                '<g id="stateBorders"><path d="M575,100 L575,500"/></g>'
+                '<g id="provinceBorders"><path d="M350,100 L350,500"/><path d="M700,100 L700,500"/></g>'
+            )
+            lines[19] = json.dumps([
+                {},
+                {"i": 1, "name": "Aurelia", "state": 1, "culture": 1, "x": 280, "y": 240, "capital": True, "port": 1, "population": 18, "cell": 0, "feature": 1},
+                {"i": 2, "name": "Riverford", "state": 1, "culture": 1, "x": 460, "y": 290, "capital": False, "port": 0, "population": 8, "cell": 1, "feature": 1},
+                {"i": 3, "name": "Ironhold", "state": 2, "culture": 1, "x": 860, "y": 310, "capital": True, "port": 1, "population": 15, "cell": 4, "feature": 1},
+                {"i": 4, "name": "Dustwatch", "state": 2, "culture": 1, "x": 640, "y": 290, "capital": False, "port": 0, "population": 7, "cell": 3, "feature": 1},
+            ])
+            lines[21] = "1,2,0,4,3,0"  # c_burg
+            lines[31] = "1,2,1,4,3,3"  # c_prov
+            lines[33] = json.dumps([
+                0,
+                {"i": 1, "name": "Valoria", "formName": "Province", "fullName": "Valoria Province", "state": 1, "center": 0, "burg": 1,
+                 "color": "#66c2a5", "pole": [280, 240], "coa": {"t1": "gules", "shield": "heater", "ordinaries": [{"ordinary": "fess", "t": "or"}]}},
+                {"i": 2, "name": "Riverford", "formName": "Duchy", "fullName": "Riverford Duchy", "state": 1, "center": 1, "burg": 2,
+                 "color": "#77d3b6", "pole": [460, 290], "coa": {"t1": "azure", "shield": "round"}},
+                {"i": 3, "name": "Ironhold", "formName": "Hold", "fullName": "Ironhold Hold", "state": 2, "center": 4, "burg": 3,
+                 "color": "#fc8d62", "pole": [860, 310], "coa": {"t1": "sable", "shield": "swiss"}},
+                {"i": 4, "name": "Dustwatch", "formName": "March", "fullName": "Dustwatch March", "state": 2, "center": 3, "burg": 4,
+                 "color": "#e78ac3", "pole": [640, 290], "coa": {"t1": "vert", "shield": "heater"}},
+            ])
+            mp2 = os.path.join(td, "multiprov.map")
+            with open(mp2, "w", encoding="utf-8") as f:
+                f.write("\n".join(lines))
+
+            imp2 = IM.import_map(mp2)
+            self.assertEqual(len(imp2["provinces"]), 4)
+            geo2 = IM.extract_map_geometry(mp2, imp2)
+            self.assertEqual(len(geo2["prov_borders"]), 2)
+
+            w2 = WG.build_world(imp2, seed=7, start_year=1250, era="Н.Е.")
+            w2 = E._intkeys(json.loads(json.dumps(w2)))
+            w2.setdefault("history", dict(states=[], world=[]))
+            w2.setdefault("journal", [])
+            w2.setdefault("mods", [])
+            sim = E.Sim(w2, seed=7)
+            self.assertEqual(len(sim.provinces), 4)
+            p4 = sim.provinces[4]
+            self.assertEqual(p4["state"], 2)
+            self.assertEqual(p4["core_state"], 2)
+            self.assertTrue(p4["governor"]["name"])
+            self.assertTrue(p4["blazon"])
+            self.assertTrue(p4["lore"])
+
+            # 3) Війна: облога -> окупація прикордонної провінції 4 -> мирна анексія на користь держави 1
+            sim.states[1]["army"] = {"Піхота": 600, "Кіннота": 200, "Маги": 50}
+            sim.states[2]["army"] = {"Піхота": 20}
+            wr = {
+                "id": 1, "name": "Прикордонна війна", "attackers": [1], "defenders": [2],
+                "start_year": 1250, "start_month": 1, "score": 28.0, "casus": "Спірні провінції",
+                "casualties": {1: 0, 2: 0}, "captured": [], "occupied_provs": [],
+            }
+            sim.w["wars"].append(wr)
+            rng = random.Random(7)
+            for _ in range(12):
+                PO.step_provincial_front(sim, wr, [1], [2], rng)
+                if p4["occupied_by"] == 1:
+                    break
+            self.assertEqual(p4["occupied_by"], 1)
+            self.assertEqual(sim.burgs[4]["occupied_by"], 1)
+            self.assertEqual(p4["state"], 2)
+            self.assertGreater(wr["score"], 28.0)
+
+            wr["score"] = 35.0
+            PO.end_war(sim, wr, rng)
+            self.assertEqual(p4["state"], 1)
+            self.assertEqual(p4["core_state"], 2)
+            self.assertIsNone(p4["occupied_by"])
+            self.assertEqual(p4["siege"], 0)
+            self.assertEqual(sim.burgs[4]["state"], 1)
+            self.assertIsNone(sim.burgs[4]["occupied_by"])
+            self.assertEqual(p4["assimilation"], 36)
+            PO.step_governors(sim, rng)
+            self.assertGreaterEqual(p4["assimilation"], 34)
+            # Капітал держави 2 залишається валідним
+            self.assertEqual(sim.burgs[sim.states[2]["capital"]]["state"], 2)
+
+            # 4) Web API, overrides для провінції, D&D-квести та Obsidian-текст
+            w2_path = os.path.join(td, "w2.json")
+            j2_path = os.path.join(td, "j2.jsonl")
+            E.save_world(sim.w, w2_path)
+            app = web.AppState(w2_path, j2_path)
+            app.overrides_file = os.path.join(td, "overrides2.json")
+            pd = app.province_detail(4)
+            self.assertEqual(pd["state"], 1)
+            self.assertEqual(pd["core_state"], 2)
+            ov = app.apply_override("province", 4, {"uk": "Пилоград", "loyalty": 88})
+            self.assertTrue(ov["ok"])
+            self.assertEqual(app.sim.provinces[4]["uk"], "Пилоград")
+            self.assertEqual(app.sim.provinces[4]["governor"]["loyalty"], 88)
+
+            quests = DT.generate_quest_hooks(app.sim, limit=6)
+            self.assertTrue(len(quests) >= 1)
+            md = RP.province_text(app.sim, 4)
+            self.assertIn("Пилоград", md)
 
 
 if __name__ == "__main__":

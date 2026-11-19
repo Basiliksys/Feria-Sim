@@ -126,6 +126,28 @@ def city_text(sim, bid):
     return "\n".join(lines)
 
 
+def province_text(sim, pid):
+    pr = sim.provinces[pid]
+    sid = pr["state"]
+    core = pr.get("core_state", sid)
+    occ = pr.get("occupied_by")
+    gov = pr.get("governor") or {}
+    traits = ", ".join(LD.GOVERNOR_TRAITS.get(t, {}).get("label", t) for t in gov.get("traits", []))
+    p_burgs = sorted((sim.burgs[b] for b in pr.get("burgs", []) if b in sim.burgs), key=lambda x: -x["pop"])
+    pop_tot = sum(b["pop"] + b["rural"] for b in p_burgs)
+    status = f"Окупована ({sim.sname(occ)})" if occ else (f"В облозі ({pr.get('siege', 0):.0f}%)" if pr.get("siege", 0) > 0 else ("Корінна земля" if core == sid else f"Анексована (корінна: {sim.sname(core)})"))
+    lines = [
+        f"{pr['uk']} ({pr['name']}) — {sim.sname(sid)} [{status}]",
+        f"Адмін. центр: {sim.bname(pr.get('burg'))}; населення провінції: {fmt_n(pop_tot)} ({len(p_burgs)} міст)",
+        f"Намісник: {gov.get('name', '—')}" + (f", {gov['age']} р." if gov.get("age") else "") + f"; риси: {traits}; лояльність: {gov.get('loyalty', 70):.0f}%",
+        f"Герб: {pr.get('blazon', '—')}",
+        f"Економічний профіль: {pr.get('specialty', '—')}",
+        f"Лор: {pr.get('lore', '—')}",
+        "Міста провінції: " + ", ".join(f"{b['uk']} ({fmt_n(b['pop'] + b['rural'])})" for b in p_burgs[:10]),
+    ]
+    return "\n".join(lines)
+
+
 # ---------------------------------------------------------------------------
 # Obsidian
 # ---------------------------------------------------------------------------
@@ -222,6 +244,15 @@ def write_states(sim, vault, hdr):
             bb = sim.burgs[b]
             L.append(f"| {bb['uk']} | {fmt_n(bb['pop'] + bb['rural'])} | [[Ринки/{safe(sim.markets[bb['market']]['uk'])}\\|{sim.markets[bb['market']]['uk']}]] | "
                      f"{'столиця ' if bb['capital'] else ''}{'порт ' if bb['port'] else ''}{'мури ' if bb['walls'] else ''}{'храм' if bb['temple'] else ''} |")
+        pids = sim.state_provinces.get(sid, [])
+        if pids:
+            L.append("\n## Провінції та намісники\n\n| Провінція | Центр | Намісник | Лояльність | Спеціалізація | Статус |\n|---|---|---|---:|---|---|")
+            for pid in sorted(pids, key=lambda x: -sum(sim.burgs[b]["pop"] + sim.burgs[b]["rural"] for b in sim.provinces[x].get("burgs", []) if b in sim.burgs))[:25]:
+                pr = sim.provinces[pid]
+                gov = pr.get("governor") or {}
+                occ = pr.get("occupied_by")
+                st_str = f"Окупована ({sim.sname(occ)})" if occ else (f"Облога {pr.get('siege', 0):.0f}%" if pr.get("siege", 0) > 0 else ("Корінна" if pr.get("core_state", sid) == sid else f"Анексована ({sim.sname(pr.get('core_state'))})"))
+                L.append(f"| {pr['uk']} | {sim.bname(pr.get('burg'))} | {gov.get('name', '—')} | {gov.get('loyalty', 70):.0f}% | {pr.get('specialty', '—')} | {st_str} |")
         # індекс цін + роздрібні D&D-ціни столиці
         L.append(f"\n## Ціни в державі\n\nІндекс цін на їжу: **{sim.price_index('food', sid):.2f}**, побут: {sim.price_index('utilities', sid):.2f}, розкіш: {sim.price_index('luxury', sid):.2f} "
                  f"(множник до роздрібних цін з [[Ціна]]).")

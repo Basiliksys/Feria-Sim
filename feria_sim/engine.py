@@ -95,7 +95,9 @@ class Sim:
         self.markets = w["markets"]
         self.burgs = w["burgs"]
         self.states = w["states"]
+        self.provinces = w.setdefault("provinces", {})
         self.edges = w["edges"]
+        self._ensure_provinces()
         meta = w["meta"]
         self.lat = {bid: meta["lat_n"] - b["y"] / meta["height"] * (meta["lat_n"] - meta["lat_s"])
                     for bid, b in self.burgs.items()}
@@ -131,11 +133,68 @@ class Sim:
         from . import politics as PO
         PO.war_pairs(self)
 
+    def _ensure_provinces(self):
+        """Мігрує старі збереження без повної прив'язки провінцій чи намісників."""
+        if not self.burgs:
+            return
+        by_st = collections.defaultdict(list)
+        for p in self.provinces.values():
+            by_st[p["state"]].append(p)
+        next_pid = (max(self.provinces) if self.provinces else 0) + 1
+        for sid in self.states:
+            if not by_st.get(sid):
+                bl = sorted((b for b in self.burgs.values() if b["state"] == sid),
+                            key=lambda x: (-int(bool(x.get("capital"))), -x["pop"]))
+                if bl:
+                    c = bl[0]
+                    pid = next_pid
+                    next_pid += 1
+                    pr = dict(id=pid, name=c["name"], full_name=c["name"], state=sid, burg=c["id"],
+                              form="Capital", color=self.states[sid].get("color", "#6a8caf"),
+                              pole=[c["x"], c["y"]], coa=None, burgs=[])
+                    self.provinces[pid] = pr
+                    by_st[sid].append(pr)
+        for pid, p in list(self.provinces.items()):
+            p.setdefault("burgs", [])
+            p.setdefault("core_state", p["state"])
+            p.setdefault("occupied_by", None)
+            p.setdefault("siege", 0.0)
+            p.setdefault("assimilation", 0)
+            p.setdefault("form_uk", LD.PROVINCE_FORM_UK.get(p.get("form") or "", "Провінція"))
+            p.setdefault("uk", f"{p['form_uk']} {LD.translit(p['name'])}")
+            p.setdefault("blazon", LD.blazon_coa(p.get("coa")))
+            p.setdefault("specialty", "Змішане господарство")
+            p.setdefault("lore", f"Край держави {self.sname(p['state'])}.")
+            if not isinstance(p.get("governor"), dict):
+                title = LD.GOVERNOR_TITLE.get(p["form_uk"], "Намісник")
+                p["governor"] = dict(name=f"{title} {LD.translit(p['name'])}", age=40,
+                                     traits=["wise_steward", "iron_commander"], loyalty=75.0)
+        for b in self.burgs.values():
+            b.setdefault("core_state", b["state"])
+            b.setdefault("occupied_by", None)
+            if b.get("province") not in self.provinces:
+                st_p = by_st.get(b["state"]) or list(self.provinces.values())
+                if st_p:
+                    chosen = min(st_p, key=lambda pr: math.hypot(
+                        b["x"] - (pr.get("pole") or [b["x"], b["y"]])[0],
+                        b["y"] - (pr.get("pole") or [b["x"], b["y"]])[1]
+                    ))
+                    b["province"] = chosen["id"]
+                    if b["id"] not in chosen["burgs"]:
+                        chosen["burgs"].append(b["id"])
+
     def refresh_ownership(self):
         w = self.w
         self.state_burgs = collections.defaultdict(list)
+        self.prov_burgs = collections.defaultdict(list)
         for bid, b in self.burgs.items():
             self.state_burgs[b["state"]].append(bid)
+            if b.get("province") in self.provinces:
+                self.prov_burgs[b["province"]].append(bid)
+        self.state_provinces = collections.defaultdict(list)
+        for pid, p in self.provinces.items():
+            p["burgs"] = list(self.prov_burgs.get(pid, []))
+            self.state_provinces[p["state"]].append(pid)
         for mid, m in self.markets.items():
             self.market_state[mid] = self.burgs[m["center"]]["state"]
         self.market_burgs = {mid: [b for b in m["burgs"]] for mid, m in self.markets.items()}
@@ -248,7 +307,19 @@ class Sim:
                 tot = b["pop"] + b["rural"]
                 labor = (tot / max(b["pop0"], 1.0)) ** 0.85
                 stab_f = 0.6 + 0.4 * clamp(st["stability"] / 100.0, 0, 1)
-                base = labor * stab_f * st.get("prod_dev", 1.0) \
+                pr = self.provinces.get(b.get("province"))
+                prov_f = 1.0
+                if pr:
+                    gov = pr.get("governor") or {}
+                    for tr in gov.get("traits", []):
+                        prov_f *= LD.GOVERNOR_TRAITS.get(tr, {}).get("prod", 1.0)
+                    if pr.get("occupied_by") or b.get("occupied_by"):
+                        prov_f *= 0.55
+                    elif pr.get("siege", 0) > 0:
+                        prov_f *= 0.75
+                elif b.get("occupied_by"):
+                    prov_f *= 0.55
+                base = labor * stab_f * st.get("prod_dev", 1.0) * prov_f \
                     * self.mm("burg", bid, "prod_all") * self.mm("state", b["state"], "prod_all") \
                     * self.mm("market", mid, "prod_all")
                 agri, cold = season(month, self.lat[bid])

@@ -672,10 +672,77 @@ def import_map(path):
         markets[e["a"]]["edges"].append(ei)
         markets[e["b"]]["edges"].append(ei)
 
-    # ---------------- провінції, культури, релігії
-    provinces = {p["i"]: dict(id=p["i"], name=p["name"], state=p["state"], burg=p.get("burg"),
-                              form=p.get("formName", "")) for p in provinces_raw[1:]
-                 if isinstance(p, dict) and p.get("name")}
+    # ---------------- провінції, прив'язка міст, культури, релігії
+    provinces = {}
+    for p in provinces_raw[1:] if len(provinces_raw) > 1 else provinces_raw:
+        if not isinstance(p, dict) or not p.get("name") or p.get("removed"):
+            continue
+        psid = p.get("state", 0)
+        if psid not in states:
+            continue
+        provinces[p["i"]] = dict(
+            id=p["i"], name=p["name"], full_name=p.get("fullName", p["name"]),
+            state=psid, burg=p.get("burg"), form=p.get("formName", ""),
+            color=p.get("color", "#6a8caf"), pole=p.get("pole"), coa=p.get("coa"),
+            burgs=[],
+        )
+
+    def _prov_xy(pr):
+        if isinstance(pr.get("pole"), (list, tuple)) and len(pr["pole"]) >= 2:
+            return pr["pole"][0], pr["pole"][1]
+        cb = burgs.get(pr.get("burg"))
+        return (cb["x"], cb["y"]) if cb else (0.0, 0.0)
+
+    by_st_provs = collections.defaultdict(list)
+    for pr in provinces.values():
+        by_st_provs[pr["state"]].append(pr)
+
+    next_pid = (max(provinces) if provinces else 0) + 1
+    for sid, bl_st in by_st_b.items():
+        if sid not in states:
+            continue
+        st_provs = by_st_provs.get(sid, [])
+        if not st_provs:
+            # Автоматичне створення провінцій для мікро-держав або карт без провінцій
+            bl_sorted = sorted(bl_st, key=lambda x: (-int(bool(x["capital"])), -x["pop"]))
+            if len(bl_sorted) <= 3:
+                centers = [bl_sorted[0]]
+                forms = ["Capital"]
+            else:
+                k = max(2, (len(bl_sorted) + 3) // 4)
+                centers = bl_sorted[:k]
+                forms = ["Capital" if c["id"] == states[sid]["capital"] else "County" for c in centers]
+            for c, frm in zip(centers, forms):
+                pid = next_pid
+                next_pid += 1
+                pr = dict(
+                    id=pid, name=c["name"], full_name=c["name"], state=sid, burg=c["id"],
+                    form=frm, color=states[sid].get("color", "#6a8caf"), pole=[c["x"], c["y"]],
+                    coa=None, burgs=[],
+                )
+                provinces[pid] = pr
+                by_st_provs[sid].append(pr)
+
+    for b in burgs.values():
+        sid = b["state"]
+        cell_i = b.get("cell", -1)
+        pid = c_prov[cell_i] if 0 <= cell_i < len(c_prov) else 0
+        if pid in provinces and provinces[pid]["state"] == sid:
+            chosen = pid
+        else:
+            st_provs = by_st_provs.get(sid) or list(provinces.values())
+            chosen = min(st_provs, key=lambda pr: _dist((b["x"], b["y"]), _prov_xy(pr)))["id"]
+        b["province"] = chosen
+        provinces[chosen]["burgs"].append(b["id"])
+
+    for pid in [k for k, pr in provinces.items() if not pr["burgs"]]:
+        del provinces[pid]
+    for pr in provinces.values():
+        if pr.get("burg") not in burgs or burgs[pr["burg"]]["province"] != pr["id"]:
+            pr["burg"] = max((burgs[bid] for bid in pr["burgs"]), key=lambda x: x["pop"])["id"]
+        if not isinstance(pr.get("pole"), (list, tuple)) or len(pr["pole"]) < 2:
+            cb = burgs[pr["burg"]]
+            pr["pole"] = [cb["x"], cb["y"]]
     culture_out = {c["i"]: dict(id=c["i"], name=c["name"], type=c.get("type", "Generic"),
                                 expansionism=c.get("expansionism", 1))
                    for c in cultures if isinstance(c, dict) and "i" in c}
@@ -851,7 +918,7 @@ def extract_map_geometry(text_or_path, world):
     width = int(meta.get("width", 1600))
     height = int(meta.get("height", 800))
 
-    land, lakes, borders, rivers = [], [], [], []
+    land, lakes, borders, prov_borders, rivers = [], [], [], [], []
     states_paths = {}
 
     if "<svg" in text and not text.lstrip().startswith("{"):
@@ -916,6 +983,13 @@ def extract_map_geometry(text_or_path, world):
                 if dm:
                     borders.append(_round_svg_path(dm.group(1)))
 
+        pbr = _svg_group_content(text, "provinceBorders")
+        if pbr:
+            for m in _RE_PATH.finditer(pbr):
+                dm = _RE_ATTR_D.search(m.group(1))
+                if dm:
+                    prov_borders.append(_round_svg_path(dm.group(1)))
+
         rv = _svg_group_content(text, "rivers")
         if rv:
             for m in _RE_PATH.finditer(rv):
@@ -942,7 +1016,7 @@ def extract_map_geometry(text_or_path, world):
 
     return dict(
         width=width, height=height,
-        land=land, lakes=lakes, states=states_paths, borders=borders, rivers=rivers,
+        land=land, lakes=lakes, states=states_paths, borders=borders, prov_borders=prov_borders, rivers=rivers,
         has_svg=bool(land or states_paths),
     )
 

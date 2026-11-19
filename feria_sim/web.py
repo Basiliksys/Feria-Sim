@@ -146,6 +146,23 @@ class AppState:
                 result=cr["result"],
                 sponsors=[sim.sname(s) for s in cr["sponsors"] if s in sim.states],
             )
+            provinces_out = []
+            for pid, pr in sim.provinces.items():
+                cb = sim.burgs.get(pr.get("burg"), {})
+                pole = pr.get("pole") or [cb.get("x", 0), cb.get("y", 0)]
+                gov = pr.get("governor") or {}
+                provinces_out.append(dict(
+                    id=pid, uk=pr["uk"], state=pr["state"], state_uk=sim.sname(pr["state"]),
+                    core_state=pr.get("core_state", pr["state"]),
+                    occupied_by=pr.get("occupied_by"),
+                    siege=round(pr.get("siege", 0.0), 1),
+                    burg=pr.get("burg"), burg_uk=cb.get("uk", ""),
+                    x=pole[0], y=pole[1],
+                    color=sim.states.get(pr.get("occupied_by") or pr["state"], {}).get("color", pr.get("color", "#6a8caf")),
+                    governor=gov.get("name", "—"),
+                    loyalty=round(gov.get("loyalty", 70.0), 1),
+                    specialty=pr.get("specialty", ""),
+                ))
             return dict(
                 date=E.date_str(w), year=w["date"]["year"], month=w["date"]["month"], tick=t,
                 world_name=w["meta"].get("world_name", "Ферія"),
@@ -164,7 +181,7 @@ class AppState:
                 tot_gdp=round(sum(x["gdp"] for x in states_out), 1),
                 indices={c: round(sim.price_index(c), 3) for c in LD.CATEGORIES},
                 history=w["history"]["world"][-180:],
-                states=states_out, markets=markets_out, burgs=burgs_out, edges=edges_out,
+                states=states_out, provinces=provinces_out, markets=markets_out, burgs=burgs_out, edges=edges_out,
                 wars=wars_out, active_events=events_active, epidemics=epidemics,
                 markers=markers, crusade=crusade_out, event_defs=event_defs,
                 journal=w["journal"][-60:][::-1],
@@ -191,6 +208,26 @@ class AppState:
                 if sid in row:
                     hist.append([t] + row[sid])
             ev = [r for r in sim.w["journal"] if sid in (r.get("states") or []) or r.get("state") == sid][-30:][::-1]
+            provs_out = []
+            for pid in sim.state_provinces.get(sid, []):
+                pr = sim.provinces.get(pid)
+                if not pr:
+                    continue
+                gov = pr.get("governor") or {}
+                pp = round(sum(sim.burgs[b]["pop"] + sim.burgs[b]["rural"] for b in pr.get("burgs", []) if b in sim.burgs))
+                occ = pr.get("occupied_by")
+                provs_out.append(dict(
+                    id=pid, uk=pr["uk"], form_uk=pr.get("form_uk", "Провінція"),
+                    burg=pr.get("burg"), burg_uk=sim.bname(pr.get("burg")),
+                    pop=pp, occupied_by=occ, occupied_uk=sim.sname(occ) if occ else None,
+                    siege=round(pr.get("siege", 0.0), 1),
+                    governor=gov.get("name", "—"),
+                    gov_traits=[LD.GOVERNOR_TRAITS.get(t, {}).get("label", t) for t in gov.get("traits", [])],
+                    loyalty=round(gov.get("loyalty", 70.0), 1),
+                    specialty=pr.get("specialty", ""), blazon=pr.get("blazon", ""),
+                    is_core=(pr.get("core_state", sid) == sid),
+                ))
+            provs_out.sort(key=lambda x: -x["pop"])
             return dict(
                 id=sid, uk=st["uk"], full_name=st["full_name"], cont=st["continent"], gov=st["gov_text"],
                 lore=st["lore"], culture=st["culture_name"], religion=st["religion_name"], coins=st["coins"],
@@ -207,7 +244,45 @@ class AppState:
                 army=st["army"], mercs=[m["name"] for m in st.get("mercs", [])],
                 worst=[dict(id=o, uk=sim.sname(o), score=round(sc, 1)) for sc, o in low],
                 best=[dict(id=o, uk=sim.sname(o), score=round(sc, 1)) for sc, o in high],
-                cities=cities, history=hist, journal=ev,
+                cities=cities, provinces=provs_out, history=hist, journal=ev,
+            )
+
+    def province_detail(self, pid):
+        with self.lock:
+            sim = self.sim
+            pid = int(pid)
+            if pid not in sim.provinces:
+                return dict(error="Провінцію не знайдено")
+            pr = sim.provinces[pid]
+            sid = pr["state"]
+            core = pr.get("core_state", sid)
+            occ = pr.get("occupied_by")
+            gov = pr.get("governor") or {}
+            p_burgs = sorted(
+                (sim.burgs[b] for b in pr.get("burgs", []) if b in sim.burgs),
+                key=lambda x: -x["pop"],
+            )
+            pop_tot = round(sum(b["pop"] + b["rural"] for b in p_burgs))
+            return dict(
+                id=pid, uk=pr["uk"], name=pr["name"], form_uk=pr.get("form_uk", "Провінція"),
+                state=sid, state_uk=sim.sname(sid),
+                core_state=core, core_uk=sim.sname(core),
+                occupied_by=occ, occupied_uk=sim.sname(occ) if occ else None,
+                siege=round(pr.get("siege", 0.0), 1),
+                assimilation=pr.get("assimilation", 0),
+                burg=pr.get("burg"), burg_uk=sim.bname(pr.get("burg")),
+                pop=pop_tot, blazon=pr.get("blazon", ""), specialty=pr.get("specialty", ""),
+                lore=pr.get("lore", ""),
+                governor=dict(
+                    name=gov.get("name", "—"), age=gov.get("age"),
+                    loyalty=round(gov.get("loyalty", 70.0), 1),
+                    traits=[LD.GOVERNOR_TRAITS.get(t, {}).get("label", t) for t in gov.get("traits", [])],
+                ),
+                cities=[dict(
+                    id=b["id"], uk=b["uk"], pop=round(b["pop"] + b["rural"]),
+                    capital=b.get("capital", False), port=b.get("port", False), walls=b.get("walls", False),
+                    market_id=b["market"], market_uk=sim.markets[b["market"]]["uk"],
+                ) for b in p_burgs],
             )
 
     def market_detail(self, mid):
@@ -427,8 +502,8 @@ class AppState:
 
     def apply_override(self, kind, target_id, fields):
         with self.lock:
-            if kind not in ("state", "burg"):
-                return dict(error="Невідомий тип об'єкта (дозволено state або burg)")
+            if kind not in ("state", "burg", "province"):
+                return dict(error="Невідомий тип об'єкта (дозволено state, burg або province)")
             try:
                 tid = int(target_id)
             except (TypeError, ValueError):
@@ -459,6 +534,34 @@ class AppState:
                         elif k == "lore":
                             st["lore"] = val
                 log_name = st["uk"]
+            elif kind == "province":
+                if tid not in self.sim.provinces:
+                    return dict(error="Провінцію не знайдено")
+                pr = self.sim.provinces[tid]
+                self._push_undo(f"редагування провінції {pr['uk']}")
+                cleaned = {}
+                for k in ("uk", "governor", "loyalty", "lore", "specialty"):
+                    if k in fields and fields[k] is not None:
+                        if k == "loyalty":
+                            if str(fields[k]).strip() == "":
+                                continue
+                            val_f = E.clamp(float(fields[k]), 0.0, 100.0)
+                            pr.setdefault("governor", {})["loyalty"] = round(val_f, 1)
+                            cleaned["loyalty"] = round(val_f, 1)
+                            continue
+                        val = str(fields[k]).strip()
+                        if k != "lore" and not val:
+                            continue
+                        cleaned[k] = val
+                        if k == "uk":
+                            pr["uk"] = val
+                        elif k == "governor":
+                            pr.setdefault("governor", {})["name"] = val
+                        elif k == "lore":
+                            pr["lore"] = val
+                        elif k == "specialty":
+                            pr["specialty"] = val
+                log_name = pr["uk"]
             else:
                 if tid not in self.sim.burgs:
                     return dict(error="Місто не знайдено")
@@ -485,7 +588,7 @@ class AppState:
                     data = {}
             worlds_map = data.setdefault("worlds", {})
             wblock = worlds_map.setdefault(world_name, {})
-            sec = "states" if kind == "state" else "burgs"
+            sec = {"state": "states", "burg": "burgs", "province": "provinces"}[kind]
             entry = wblock.setdefault(sec, {}).get(str(tid))
             if not isinstance(entry, dict):
                 entry = {"uk": entry} if entry else {}
@@ -681,6 +784,8 @@ def make_handler(app: AppState):
                 self._json(app.overview())
             elif u.path == "/api/state":
                 self._json(app.state_detail(int(qs.get("id", [0])[0])))
+            elif u.path == "/api/province":
+                self._json(app.province_detail(int(qs.get("id", [0])[0])))
             elif u.path == "/api/market":
                 self._json(app.market_detail(int(qs.get("id", [0])[0])))
             elif u.path == "/api/goods":
