@@ -170,10 +170,30 @@ def h_wildfire(sim, rng, bid, sev, dur):
 
 
 def h_plague(sim, rng, mid, sev, dur):
-    ep = dict(id=len(sim.w.setdefault("epidemics", [])) + 1, sev=sev, markets={mid: 1.0},
-              name=rng.choice(["Сіра пошесть", "Червоний кашель", "Чорна лихоманка", "Жовта волога", "Пошесть Трьох Місяців"]),
-              start=sim.tick_index(), end=sim.tick_index() + dur + 6)
-    sim.w["epidemics"].append(ep)
+    t = sim.tick_index()
+    eps = sim.w.setdefault("epidemics", [])
+    if len(eps) >= 2:
+        return None
+    imm = sim.w.setdefault("market_immunity", {})
+    if imm.get(mid, -1) > t or any(mid in ep.get("markets", {}) for ep in eps):
+        cand = [m for m in sim.markets if imm.get(m, -1) <= t and all(m not in ep.get("markets", {}) for ep in eps)]
+        if not cand:
+            return None
+        mid = rng.choice(cand)
+    max_mk = 3 + sev * 3
+    ep = dict(
+        id=int(sim.w.get("_ep_seq", 0)) + 1,
+        sev=sev,
+        markets={mid: 0.85},
+        visited=[mid],
+        max_markets=max_mk,
+        name=rng.choice(["Сіра пошесть", "Червоний кашель", "Чорна лихоманка", "Жовта волога", "Пошесть Трьох Місяців"]),
+        start=t,
+        end=t + dur + 2,
+    )
+    sim.w["_ep_seq"] = ep["id"]
+    eps.append(ep)
+    imm[mid] = t + dur + 24
     m = sim.markets[mid]
     sid = sim.market_state[mid]
     _record(sim, "plague", "market", m["uk"], sev, dur,
@@ -183,26 +203,46 @@ def h_plague(sim, rng, mid, sev, dur):
 def step_epidemics(sim, rng):
     w = sim.w
     t = sim.tick_index()
+    imm = w.setdefault("market_immunity", {})
+    for k in [k for k, until in imm.items() if until <= t]:
+        del imm[k]
     eps = w.get("epidemics", [])
     for ep in list(eps):
+        if t > ep.get("end", t) + 4:
+            eps.remove(ep)
+            sim.log("disease", f"Епідемія «{ep['name']}» згасла.", sev=1)
+            continue
+        visited = set(ep.get("visited") or ep["markets"].keys())
+        max_mk = int(ep.get("max_markets", 3 + ep.get("sev", 2) * 3))
         new = {}
-        for mid, inten in ep["markets"].items():
+        for mid, inten in list(ep["markets"].items()):
+            if mid not in sim.markets:
+                continue
             m = sim.markets[mid]
-            sim.add_mod("market", mid, "mort", 0.0035 * ep["sev"] * inten, 1, "plague", kind="add")
-            sim.add_mod("market", mid, "trade", 1 - 0.25 * inten, 1, "quarantine")
-            for ei in m["edges"]:
-                e = sim.edges[ei]
-                other = e["b"] if e["a"] == mid else e["a"]
-                if other in ep["markets"] or other in new:
-                    continue
-                if rng.random() < 0.10 * inten * clamp(e.get("flow", 0) / 50.0 + 0.2, 0, 1.2) \
-                        and not sim.at_war(sim.market_state[mid], sim.market_state[other]):
-                    new[other] = 0.6
-                    sim.log("disease", f"Епідемія «{ep['name']}» дісталася {sim.markets[other]['uk']}.", market=other,
-                            states=[sim.market_state[other]], sev=2)
-            ep["markets"][mid] = inten * (0.93 if t < ep["end"] else 0.7)
+            sim.add_mod("market", mid, "mort", 0.0012 * ep["sev"] * inten, 1, "plague", kind="add")
+            sim.add_mod("market", mid, "trade", 1 - 0.20 * inten, 1, "quarantine")
+            if t < ep["end"] and inten >= 0.30 and (len(visited) + len(new)) < max_mk:
+                for ei in m["edges"]:
+                    if (len(visited) + len(new)) >= max_mk:
+                        break
+                    e = sim.edges[ei]
+                    other = e["b"] if e["a"] == mid else e["a"]
+                    if other in ep["markets"] or other in new or other in visited or imm.get(other, -1) > t:
+                        continue
+                    if sim.at_war(sim.market_state[mid], sim.market_state[other]):
+                        continue
+                    flow_f = clamp(math.log1p(max(e.get("flow", 0.0), 0.0)) / 10.0, 0.15, 0.85)
+                    sea_f = 0.45 if e.get("sea") else 1.0
+                    if rng.random() < 0.055 * inten * flow_f * sea_f:
+                        new[other] = round(inten * 0.65, 3)
+                        visited.add(other)
+                        imm[other] = t + 24
+                        sim.log("disease", f"Епідемія «{ep['name']}» дісталася {sim.markets[other]['uk']}.", market=other,
+                                states=[sim.market_state[other]], sev=2)
+            ep["markets"][mid] = inten * (0.72 if t < ep["end"] else 0.45)
         ep["markets"].update(new)
-        ep["markets"] = {k: v for k, v in ep["markets"].items() if v > 0.08}
+        ep["visited"] = list(visited)
+        ep["markets"] = {k: v for k, v in ep["markets"].items() if v > 0.10}
         if not ep["markets"]:
             eps.remove(ep)
             sim.log("disease", f"Епідемія «{ep['name']}» згасла.", sev=1)

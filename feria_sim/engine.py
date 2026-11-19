@@ -478,13 +478,19 @@ class Sim:
             fs = sat.get("food", 1.0)
             us = sat.get("utilities", 1.0)
             agri, cold = season(month, self.lat[bid])
-            birth = cfg["birth"] * (0.5 + 0.5 * fs) * self.mm("state", sid, "pop_growth") * self.mm("burg", bid, "pop_growth")
-            death = cfg["death"] + max(0.0, 1 - fs) ** 1.2 * 0.02 + max(0.0, 1 - us) * cold * 0.004 \
-                + self.ma("burg", bid, "mort") + self.ma("state", sid, "mort") + self.ma("market", b["market"], "mort")
             tot = b["pop"] + b["rural"]
-            cap = b["pop0"] * 2.3
-            crowd = clamp(1 - tot / cap, -0.5, 1.0) if cap > 0 else 0.0
-            net = birth * (0.35 + 0.65 * max(crowd, 0)) - death
+            ratio = tot / max(b["pop0"], 1.0)
+            if ratio <= 1.0:
+                # Компенсаційне відновлення після епідемій та воєн за наявності їжі
+                growth_factor = 1.0 + clamp(1.0 - ratio, 0.0, 0.75) * 0.85 * max(0.0, fs - 0.5)
+            else:
+                # Плавне сповільнення приросту при наближенні до місткості середовища (1.65x pop0)
+                growth_factor = clamp(1.0 - (ratio - 1.0) / 0.65, 0.25, 1.0)
+            birth = cfg["birth"] * (0.5 + 0.5 * fs) * growth_factor \
+                * self.mm("state", sid, "pop_growth") * self.mm("burg", bid, "pop_growth")
+            mort_add = min(0.015, self.ma("burg", bid, "mort") + self.ma("state", sid, "mort") + self.ma("market", b["market"], "mort"))
+            death = cfg["death"] + max(0.0, 1 - fs) ** 1.2 * 0.02 + max(0.0, 1 - us) * cold * 0.004 + mort_add
+            net = birth - death
             b["pop"] *= (1 + net)
             b["rural"] *= (1 + net * 0.98)
             # урбанізація при добрій їжі

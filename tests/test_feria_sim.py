@@ -312,6 +312,20 @@ class TestFeriaSim(unittest.TestCase):
                 srv.shutdown()
                 srv.server_close()
 
+    def test_epidemic_burnout_and_population_recovery(self):
+        with tempfile.TemporaryDirectory() as td:
+            _, _, _, _, sim = _build_calibrated_test_world(td, seed=11)
+            sim.w["config"]["event_rate"] = 0.0
+            pop0 = sum(b["pop"] + b["rural"] for b in sim.burgs.values())
+            sim.acc = dict(pop={}, gdp={})
+            EV.fire(sim, sim.rng, "plague", target=1, sev=3)
+            self.assertEqual(len(sim.w.get("epidemics", [])), 1)
+            sim.run(24)
+            self.assertEqual(len(sim.w.get("epidemics", [])), 0)
+            self.assertTrue(sim.w.get("market_immunity"))
+            pop_end = sum(b["pop"] + b["rural"] for b in sim.burgs.values())
+            self.assertGreaterEqual(pop_end, pop0 * 0.98)
+
 
 if __name__ == "__main__":
     unittest.main()

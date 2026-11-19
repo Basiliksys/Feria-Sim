@@ -574,7 +574,7 @@ EVENT_TABLE = {
     "volcano":          dict(scope="marker", weight=0.15, cat="nature", dur=(6, 18), sev=(2, 3)),
     "wildfire":         dict(scope="burg", weight=0.4, cat="nature", dur=(2, 4), sev=(1, 2)),
     # --- хвороби
-    "plague":           dict(scope="market", weight=0.35, cat="disease", dur=(4, 12), sev=(2, 3)),
+    "plague":           dict(scope="market", weight=0.18, cat="disease", dur=(3, 7), sev=(1, 3)),
     "cattle_murrain":   dict(scope="state", weight=0.45, cat="disease", dur=(3, 7), sev=(1, 2)),
     # --- економіка
     "gold_rush":        dict(scope="burg", weight=0.35, cat="economy", dur=(6, 18), sev=(1, 3)),
