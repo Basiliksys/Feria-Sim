@@ -4,13 +4,34 @@
 Додає те, чого немає на карті: українські назви, правителів і риси, відносини
 між державами, війни, гільдії, найманців, калібрування економіки та казни.
 """
+import copy
 import json
+import math
 import os
 import random
 import re
 
 from . import lore_data as LD
 from . import engine as E
+
+# Канонічні значення конфігурації живуть в engine.CONFIG_DEFAULTS, щоб Sim міг
+# підставляти їх для старих збережень; тут доступний той самий контракт.
+CONFIG_DEFAULTS = E.CONFIG_DEFAULTS
+
+
+def _finite(value, default=None, lo=None, hi=None):
+    """Скінченне число з фолбеком (для content pack та інших недовірених даних)."""
+    try:
+        v = float(value)
+    except (TypeError, ValueError, OverflowError):
+        return default
+    if not math.isfinite(v):
+        return default
+    if lo is not None and v < lo:
+        v = lo
+    if hi is not None and v > hi:
+        v = hi
+    return v
 
 PREFIX_UK = [
     ("Grand Duchy", "Велике герцогство"), ("Duchy", "Герцогство"), ("Kingdom", "Королівство"),
@@ -34,17 +55,34 @@ def _prefix(full_name):
     return "Держава"
 
 
+def _gids(*names):
+    """Стабільні ID товарів за назвою; невідомі назви тихо пропускаємо."""
+    table = getattr(LD, "GOOD_IDS", {})
+    out = []
+    for name in names:
+        gid = table.get(name)
+        if gid is not None and gid not in out:
+            out.append(gid)
+    return out
+
+
 def _generate_generic_orgs(w, rng):
     """Генерує гільдії, найманців і ордени для довільної карти з Azgaar."""
     burgs = sorted(w["burgs"].values(), key=lambda b: -b["pop"])
     states = sorted(w["states"].values(), key=lambda s: -(s["urban_k"] + s["rural_k"]))
     templates = [
-        ("g_iron", "Гільдія гірників і ковалів", "craft", [4, 34, 58, 59], "Видобуток заліза, вугілля та кузня."),
-        ("g_grain", "Торговий союз землеробів", "food", [9, 10, 66, 67], "Постачання зерна, худоби та харчів."),
-        ("g_sea", "Ліга морських купців", "maritime", [52, 53, 48, 27], "Морська торгівля, верфі та прянощі.", True),
-        ("g_cloth", "Цех ткачів і кравців", "craft", [43, 44, 45, 54], "Виробництво сукна, одягу та взуття."),
-        ("g_bank", "Міняйли та ювеліри", "finance", [7, 8, 62, 63], "Карбування монет і банківські векселі."),
-        ("g_alch", "Колегія алхіміків і книгарів", "arcane", [33, 49, 50, 51, 60], "Книги, чорнила, скло та селітра."),
+        ("g_iron", "Гільдія гірників і ковалів", "craft",
+         _gids("iron", "coal", "tools", "arms"), "Видобуток заліза, вугілля та кузня."),
+        ("g_grain", "Торговий союз землеробів", "food",
+         _gids("grain", "cattle", "cheese", "beer"), "Постачання зерна, худоби та харчів."),
+        ("g_sea", "Ліга морських купців", "maritime",
+         _gids("sails", "ships", "rope", "spices"), "Морська торгівля, верфі та прянощі.", True),
+        ("g_cloth", "Цех ткачів і кравців", "craft",
+         _gids("leather", "cloth", "garments", "boots"), "Виробництво сукна, одягу та взуття."),
+        ("g_bank", "Міняйли та ювеліри", "finance",
+         _gids("silver", "gold", "coins", "jewelry"), "Карбування монет і банківські векселі."),
+        ("g_alch", "Колегія алхіміків і книгарів", "arcane",
+         _gids("saltpeter", "paper", "ink", "books", "gunpowder"), "Книги, чорнила, скло та селітра."),
     ]
     guilds = []
     ports = [b for b in burgs if b["port"]]
@@ -58,7 +96,8 @@ def _generate_generic_orgs(w, rng):
         used.add(hb["id"])
         guilds.append(dict(
             id=tpl[0], name=f"{tpl[1]} ({hb['uk']})", kind=tpl[2], burg=hb["id"], market=hb["market"],
-            state=hb["state"], goods=tpl[3], wealth=round(max(2000.0, hb["pop"] * 0.4), 1),
+            state=hb["state"], goods=[g for g in tpl[3] if g in w["goods"]],
+            wealth=round(max(2000.0, hb["pop"] * 0.4), 1),
             power=0.5, note=tpl[4], rep={},
         ))
     mercs = []
@@ -94,6 +133,199 @@ def _resolve_overrides(overrides, world_name, is_feria):
     if not is_feria and overrides and "world_name" not in overrides and "worlds" in overrides:
         return {}, {}, {}
     return overrides.get("states", {}), overrides.get("burgs", {}), overrides.get("provinces", {})
+
+
+CONTENT_PACK_PATH = os.path.join(
+    os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "data", "content_pack.json"
+)
+
+# Дозволені ключі config з діапазонами (невідомі ключі ігноруються).
+_CONTENT_CONFIG_RANGES = {
+    "price_elasticity": (0.0, 2.0),
+    "carry_cap": (1.01, 10.0),
+    "tech_cap": (1.0, 20.0),
+    "tech_decay": (0.0, 1.0),
+    "max_events_per_month": (0, 100),
+    "neighbor_drift": (-1.0, 1.0),
+    "army_recovery_rate": (0.0, 1.0),
+    "trade_budget_factor": (0.0, 100.0),
+    "guild_invest_rate": (0.0, 1.0),
+    "mil_k": (0.0, 100.0),
+    "mil_goods_per_head": (0.0, 1.0),
+    "event_rate": (0.0, 100.0),
+    "war_rate": (0.0, 100.0),
+    "craft_scale": (0.0, 100.0),
+    "transport_rate": (0.0, 10.0),
+    "birth": (0.0, 1.0),
+    "death": (0.0, 1.0),
+    "poll_k": (0.0, 1000.0),
+    "admin_share": (0.0, 1.0),
+}
+_CONTENT_CONFIG_BOOLS = frozenset((
+    "event_scale_by_size", "demand_elasticity_enabled", "dynamic_recipes", "capital_constraint",
+))
+_CONTENT_GOOD_KEYS = frozenset((
+    "value", "cover", "recipes", "name", "unit", "tags", "chance", "biomeOutput", "multipliers",
+))
+
+
+def _coerce_pack_config(key, val, current):
+    """Повертає валідне значення для відомого ключа або поточне (фолбек)."""
+    if key in _CONTENT_CONFIG_BOOLS:
+        if isinstance(val, bool):
+            return val
+        if isinstance(val, str) and val.lower() in ("true", "false"):
+            return val.lower() == "true"
+        return current
+    if key == "per_capita":
+        if not isinstance(val, dict) or not isinstance(current, dict):
+            return current
+        pc = dict(current)
+        for cat in ("food", "utilities", "construction", "luxury"):
+            if cat in val:
+                v = _finite(val[cat], None, 0.0, 1e6)
+                if v is not None:
+                    pc[cat] = v
+        return pc
+    if key not in _CONTENT_CONFIG_RANGES:
+        return current
+    v = _finite(val, None)
+    if v is None:
+        return current
+    lo, hi = _CONTENT_CONFIG_RANGES[key]
+    v = min(hi, max(lo, v))
+    return int(v) if key == "max_events_per_month" else v
+
+
+def _load_content_pack():
+    """Необов'язковий content pack: читає <repo>/data/content_pack.json, якщо він є.
+
+    Файл може містити ``config`` (перевизначення ключів world.config), ``goods``
+    (за ID товару) та ``event_weights`` (ваги подій за ключем). Усе інше ігнорується.
+    """
+    if not os.path.isfile(CONTENT_PACK_PATH):
+        return {}
+    try:
+        with open(CONTENT_PACK_PATH, encoding="utf-8") as f:
+            data = json.load(f)
+    except (OSError, ValueError, TypeError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def _apply_content_pack(w):
+    """Застосовує content pack до світу; викликається до ініціалізації ринків.
+
+    Контракт навмисно вузький: лише відомі ключі config, ваги подій із EVENT_TABLE
+    та перевизначення вже існуючих товарів із перевіреними полями.
+    """
+    pack = _load_content_pack()
+    if not isinstance(pack, dict):
+        return
+    cfg = w.setdefault("config", {})
+    over = pack.get("config")
+    if isinstance(over, dict):
+        for key, val in over.items():
+            current = cfg.get(key, CONFIG_DEFAULTS.get(key))
+            cfg[key] = _coerce_pack_config(key, val, current)
+    # Ваги подій: базові з EVENT_TABLE + перевизначення з паку (events.py читає cfg["event_weights"]).
+    weights = {}
+    for key, spec in LD.EVENT_TABLE.items():
+        base = spec.get("weight", 1.0) if isinstance(spec, dict) else 1.0
+        weights[key] = _finite(base, 1.0, 0.0, 1e6)
+    ew = pack.get("event_weights")
+    if isinstance(ew, dict):
+        for key, val in ew.items():
+            if key not in LD.EVENT_TABLE:
+                continue
+            v = _finite(val, None, 0.0, 1e6)
+            if v is not None:
+                weights[key] = v
+    cfg["event_weights"] = weights
+    # Перевизначення товарів за ID (тільки для вже існуючих товарів).
+    goods = w.get("goods")
+    goods_over = pack.get("goods")
+    if not isinstance(goods, dict) or not isinstance(goods_over, dict):
+        return
+    for key, vals in goods_over.items():
+        if not isinstance(key, str) or not key.isdigit():
+            continue
+        gid = int(key)
+        if str(gid) != key or gid <= 0:
+            continue
+        gd = goods.get(gid)
+        if not isinstance(gd, dict) or not isinstance(vals, dict):
+            continue
+        upd = {}
+        for field in _CONTENT_GOOD_KEYS:
+            if field not in vals:
+                continue
+            val = vals[field]
+            if field == "value":
+                v = _finite(val, None, 1e-9, 1e9)
+                if v is not None:
+                    upd["value"] = v
+            elif field == "cover":
+                if isinstance(val, dict):
+                    cov = {}
+                    for cat, amount in val.items():
+                        if cat in LD.CATEGORIES:
+                            v = _finite(amount, None, 0.0, 100.0)
+                            if v is not None:
+                                cov[cat] = v
+                    upd["cover"] = cov
+            elif field == "recipes":
+                if isinstance(val, (list, tuple)):
+                    norm = []
+                    for rec in val:
+                        if not isinstance(rec, dict):
+                            continue
+                        nrec = {}
+                        for iid, qty in rec.items():
+                            try:
+                                iid_i = int(iid)
+                            except (TypeError, ValueError):
+                                continue
+                            if str(iid_i) != str(iid) or iid_i not in goods:
+                                continue
+                            q = _finite(qty, None, 1e-9, 1e9)
+                            if q is not None:
+                                nrec[iid_i] = q
+                        if nrec:
+                            norm.append(nrec)
+                    upd["recipes"] = norm
+            elif field in ("name", "unit"):
+                if isinstance(val, str):
+                    upd[field] = val
+            elif field == "tags":
+                if isinstance(val, (list, tuple)):
+                    upd["tags"] = [str(t) for t in val]
+            elif field == "chance":
+                v = _finite(val, None, 0.0, 1e6)
+                if v is not None:
+                    upd["chance"] = v
+            elif field == "biomeOutput":
+                if isinstance(val, dict):
+                    bio = {}
+                    for bk, bv in val.items():
+                        try:
+                            bk_i = int(bk)
+                        except (TypeError, ValueError):
+                            continue
+                        q = _finite(bv, None, 0.0, 1000.0)
+                        if str(bk_i) == str(bk) and q is not None:
+                            bio[bk_i] = q
+                    upd["biomeOutput"] = bio
+            elif field == "multipliers":
+                if isinstance(val, dict) and isinstance(val.get("cultureType"), dict):
+                    mult = {}
+                    for k, qv in val["cultureType"].items():
+                        q = _finite(qv, None, 0.0, 100.0)
+                        if q is not None:
+                            mult[str(k)] = q
+                    upd["multipliers"] = {"cultureType": mult}
+        if upd:
+            gd.update(upd)
 
 
 def _make_province_lore(w, p, p_burgs):
@@ -138,8 +370,17 @@ def build_world(imp, seed=1, overrides=None, start_year=None, era=None):
     rng = random.Random(seed)
     overrides = overrides or {}
     w = imp
+    # Спільний контракт конфігурації +(map-specific) значення.
+    w["config"] = {k: (dict(v) if isinstance(v, dict) else v) for k, v in E.CONFIG_DEFAULTS.items()}
+    w["config"].update(dict(
+        per_capita={"food": 10.0, "utilities": 4.0, "construction": 1.5, "luxury": 0.8},
+        craft_scale=1.0, transport_rate=0.012, birth=0.0042, death=0.0028,
+        poll_k=1.0, mil_k=1.0, mil_goods_per_head=0.002, admin_share=0.2,
+        event_rate=1.0, war_rate=1.0,
+    ))
+    _apply_content_pack(w)
     cultures = w["cultures"]
-    start_year = int(LD.START_YEAR if start_year is None else start_year)
+    start_year = int(_finite(start_year, LD.START_YEAR, -100000, 100000))
     era = LD.ERA_SHORT if era is None else era
     matched_known = sum(1 for st in w["states"].values() if st["name"] in LD.KNOWN_STATES)
     world_name = w["meta"].get("world_name", "Feria")
@@ -156,10 +397,14 @@ def build_world(imp, seed=1, overrides=None, start_year=None, era=None):
         b["core_state"] = b["state"]
         b["occupied_by"] = None
     for m in w["markets"].values():
-        m["name"] = w["burgs"][m["center"]]["name"]
-        m["uk"] = w["burgs"][m["center"]]["uk"]
-        m["capital"] = 0.0
+        cb = w["burgs"][m["center"]]
+        m["name"] = cb["name"]
+        m["uk"] = cb["uk"]
+        m["capital"] = E.seed_market_capital(cb.get("pop", 0.0))
+        m["shop_reserved"] = {}
         m["want"] = {}
+        m.setdefault("stock", {})
+        m.setdefault("price", {})
         for g in w["goods"]:
             m["stock"].setdefault(g, 0.0)
             m["price"].setdefault(g, w["goods"][g]["value"])
@@ -266,9 +511,10 @@ def build_world(imp, seed=1, overrides=None, start_year=None, era=None):
     w["relations"] = rel
     w["vassals"] = vassals
     # ---- війни
-    map_yr = w["meta"].get("map_year")
+    map_yr = _finite(w["meta"].get("map_year"), 0, -100000, 100000)
+    map_yr = int(map_yr)
     if is_feria:
-        shift = start_year - (map_yr or LD.MAP_YEAR)
+        shift = (start_year - map_yr) if map_yr else LD.MAP_YEAR_OFFSET + (start_year - LD.START_YEAR)
     else:
         shift = (start_year - map_yr) if map_yr else 0
     wars = []
@@ -328,12 +574,6 @@ def build_world(imp, seed=1, overrides=None, start_year=None, era=None):
     w["mods"] = []
     w["journal"] = []
     w["history"] = dict(states=[], world=[])
-    w["config"] = dict(
-        per_capita={"food": 10.0, "utilities": 4.0, "construction": 1.5, "luxury": 0.8},
-        craft_scale=1.0, transport_rate=0.012, birth=0.0042, death=0.0028,
-        poll_k=1.0, mil_k=1.0, mil_goods_per_head=0.002, admin_share=0.2,
-        event_rate=1.0, war_rate=1.0,
-    )
     w["meta"]["sim_seed"] = seed
     w["meta"]["start_year"] = start_year
     w["meta"]["era"] = era
@@ -349,9 +589,18 @@ def _make_name(rng, cult):
 # ---------------------------------------------------------------------------
 # Калібрування економіки
 # ---------------------------------------------------------------------------
-def calibrate(sim, log=print, warm_iters=30, months_per=3):
+def _calibrate_in_place(sim, log=print, warm_iters=30, months_per=3):
+    """Внутрішня калібрування на тимчасовій копії світу (див. ``calibrate``)."""
     w = sim.w
     cfg = w["config"]
+    orig_date = dict(w["date"])
+    orig_capital = {mid: m.get("capital", 0.0) for mid, m in sim.markets.items()}
+    # калібрування не повинно залишати сліди у службових структурах світу
+    orig_mods = list(w.get("mods", []))
+    orig_journal = list(w.get("journal", []))
+    orig_new_journal = list(w.get("_new_journal", []))
+    orig_events = list(w.get("active_events", []))
+    orig_history = {k: list(v) for k, v in w.get("history", {}).items()}
     # 1) початкові душові норми з потенційної пропозиції сировини
     pop_k = sum(b["pop"] + b["rural"] for b in sim.burgs.values()) / 1000.0
     sup = {c: 0.0 for c in LD.CATEGORIES}
@@ -386,7 +635,8 @@ def calibrate(sim, log=print, warm_iters=30, months_per=3):
         tot_req = {c: 0.0 for c in cats}
         tot_got = {c: 0.0 for c in cats}
         for _ in range(months_per):
-            sim.tick(politics=False, events=False, advance=False, finance=False)
+            # календар реально йде вперед: RNG і сезонність змінюються від місяця до місяця
+            sim.tick(politics=False, events=False, advance=True, finance=False)
             for sid in sim.acc["req"]:
                 for c in cats:
                     tot_req[c] += sim.acc["req"][sid].get(c, 0.0)
@@ -412,7 +662,7 @@ def calibrate(sim, log=print, warm_iters=30, months_per=3):
     gdp = {s: 0.0 for s in sim.states}
     cons = {s: 0.0 for s in sim.states}
     for _ in range(3):
-        sim.tick(politics=False, events=False, advance=False, finance=False)
+        sim.tick(politics=False, events=False, advance=True, finance=False)
         for s in sim.states:
             gdp[s] += sim.acc["gdp"].get(s, 0.0) / 3
             cons[s] += sim.acc["cons_val"].get(s, 0.0) / 3
@@ -433,8 +683,78 @@ def calibrate(sim, log=print, warm_iters=30, months_per=3):
         st["treasury"] = rev * 12.0 * E.clamp(ratio, 0.25, 2.5)
         st["pop_cache"] = pop
     log("[calib] фінанси: poll_k={:.3f}".format(cfg["poll_k"]))
+    # повертаємо капітали, дату й службові структури: калібрування не має забруднювати світ
+    for mid, m in sim.markets.items():
+        cap = orig_capital.get(mid, 0.0)
+        if cap <= 0:
+            cap = E.seed_market_capital(sim.burgs.get(m["center"], {}).get("pop", 0.0))
+        m["capital"] = cap
+    w["date"] = orig_date
+    w["history"] = orig_history
+    w["journal"] = orig_journal
+    if orig_new_journal:
+        w["_new_journal"] = orig_new_journal
+    else:
+        w.pop("_new_journal", None)
+    w["mods"] = orig_mods
+    w["active_events"] = orig_events
+    sim._index_mods()
+
+
+def calibrate(sim, log=print, warm_iters=30, months_per=3):
+    """Калібрує економіку, не змінюючи стан гри окрім калібрувальних констант.
+
+    Прогрів тикає симуляцію, тому працюємо на глибокій копії світу й переносимо
+    назад лише ``config`` та фінансові похідні держав. Повторний виклик дає той
+    самий результат (ідемпотентність).
+    """
+    original = sim.w
+    work = copy.deepcopy(original)
+    sim.w = work
+    sim.build_runtime()
+    # Прогів починається з канонічного порожнього ринку: це робить повторний
+    # виклик ідемпотентним навіть після того, як перший калібрував запаси.
     for m in sim.markets.values():
-        m["capital"] = 0.0
+        m["stock"] = {g: 0.0 for g in sim.goods}
+        m["price"] = {g: sim.goods[g]["value"] for g in sim.goods}
+        m["want"] = {}
+        m["want_now"] = {}
+        m["shop_reserved"] = {}
+        cb = sim.burgs.get(m.get("center"), {})
+        m["capital"] = E.seed_market_capital(cb.get("pop", 0.0))
+    try:
+        _calibrate_in_place(sim, log=log, warm_iters=warm_iters, months_per=months_per)
+        cfg_out = copy.deepcopy(work.get("config", {}))
+        outputs = {}
+        for sid, st in sim.states.items():
+            if isinstance(st, dict):
+                outputs[sid] = {k: copy.deepcopy(st[k])
+                                for k in ("rev0", "army_cost", "treasury", "pop_cache") if k in st}
+        # Запаси, набрані під час прогріву, є частиною початкової економіки:
+        # без них ринки стартують порожніми й торгівля/крамниці не працюють.
+        stocks = {mid: copy.deepcopy(m.get("stock", {})) for mid, m in sim.markets.items()}
+    finally:
+        sim.w = original
+        sim.build_runtime()
+    cfg = original.get("config")
+    if not isinstance(cfg, dict):
+        cfg = {}
+        original["config"] = cfg
+    cfg.update(cfg_out)
+    states = original.get("states")
+    if isinstance(states, dict):
+        for sid, vals in outputs.items():
+            st = states.get(sid)
+            if isinstance(st, dict):
+                st.update(vals)
+    markets = original.get("markets")
+    if isinstance(markets, dict):
+        for mid, stock in stocks.items():
+            m = markets.get(mid)
+            if isinstance(m, dict):
+                m["stock"] = stock
+    sim.build_runtime()
+    sim._index_mods()
 
 
 def _state_pop(sim, sid):

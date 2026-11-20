@@ -1,17 +1,25 @@
 # -*- coding: utf-8 -*-
 """Автоматизований набір інженерних та інтеграційних тестів Feria-Sim."""
+import argparse
+import base64
+import contextlib
 import gzip
+import io
 import json
 import math
 import os
 import random
+import re
 import shutil
 import tempfile
 import threading
 import unittest
+import urllib.error
 import urllib.request
+import zlib
+from unittest import mock
 
-from feria_sim import cli, dnd_tools as DT, engine as E, events as EV, importer as IM, politics as PO, report as RP, web, worldgen as WG
+from feria_sim import cli, dnd_tools as DT, engine as E, events as EV, importer as IM, lore_data as LD, politics as PO, report as RP, web, worldgen as WG
 
 
 def _sample_vanilla_map_lines(with_svg=True):
@@ -208,6 +216,216 @@ class TestFeriaSim(unittest.TestCase):
             self.assertTrue(hooks)
             self.assertTrue(any("Ірж" in h["title"] or "Іржі" in h["title"] for h in hooks))
 
+    def test_config_contract_and_content_pack(self):
+        with tempfile.TemporaryDirectory() as td:
+            pack_path = os.path.join(td, "content_pack.json")
+            with open(pack_path, "w", encoding="utf-8") as f:
+                json.dump({
+                    "config": {"event_rate": 0.75, "carry_cap": 1.9},
+                    "event_weights": {"drought": 3.5},
+                    "goods": {"9": {"value": 12.5}},
+                }, f)
+            with mock.patch.object(WG, "CONTENT_PACK_PATH", pack_path):
+                mpath = os.path.join(td, "pack.map")
+                with open(mpath, "w", encoding="utf-8") as f:
+                    f.write(_sample_vanilla_map_lines())
+                imp = IM.import_map(mpath)
+                w = WG.build_world(imp, seed=2, start_year=1250, era="Н.Е.")
+
+            for key in E.CONFIG_DEFAULTS:
+                self.assertIn(key, w["config"], msg=key)
+            self.assertEqual(w["config"]["event_rate"], 0.75)
+            self.assertEqual(w["config"]["carry_cap"], 1.9)
+            self.assertEqual(w["config"]["event_weights"]["drought"], 3.5)
+            self.assertEqual(w["goods"][9]["value"], 12.5)
+
+            raw = json.loads(json.dumps(w))
+            w = E._intkeys(json.loads(json.dumps(raw)))
+            sim = E.Sim(w, seed=2)
+            self.assertEqual(sim.cfg("carry_cap"), 1.9)
+            self.assertEqual(sim.cfg("missing_key", 42), 42)
+            self.assertEqual(sim.gid("grain"), 9)
+            for m in sim.markets.values():
+                self.assertIsInstance(m.get("capital"), (int, float))
+                self.assertIsInstance(m.get("shop_reserved"), dict)
+
+            # Старе збереження без капіталу ринку має отримати значення за замовчуванням.
+            old = E._intkeys(json.loads(json.dumps(raw)))
+            for m in old["markets"].values():
+                m.pop("capital", None)
+                m.pop("shop_reserved", None)
+            sim_old = E.Sim(old, seed=2)
+            for m in sim_old.markets.values():
+                self.assertGreater(m["capital"], 0)
+                self.assertEqual(m["shop_reserved"], {})
+
+            # Політичні похідні з рис правителя й обмеження технологій.
+            PO.sync_ruler_fields(sim)
+            for st in sim.states.values():
+                for key in ("trade_mod", "tariff_mod", "war_power"):
+                    self.assertIsInstance(st[key], (int, float))
+            sim.w["config"]["tech_decay"] = 0.1
+            sim.states[1]["tech"] = 2.0
+            PO.decay_tech(sim, sim.states[1])
+            self.assertLess(sim.states[1]["tech"], 2.0)
+            self.assertGreaterEqual(sim.states[1]["tech"], 1.0)
+            self.assertEqual(PO.clamp_tech(sim, 9.0), 3.0)
+            tick = sim.tick_index()
+            sim.states[1]["truce"] = {2: tick + 5}
+            self.assertTrue(PO.truce_active(sim, 1, 2))
+            self.assertTrue(PO.truce_active(sim, 2, 1))
+            sim.states[1]["truce"][2] = tick - 1
+            self.assertFalse(PO.truce_active(sim, 1, 2))
+
+    def test_event_choices_quest_lifecycle_and_shop_stock(self):
+        with tempfile.TemporaryDirectory() as td:
+            _, _, _, _, sim = _build_calibrated_test_world(td, seed=13)
+            sim.states[1]["treasury"] = 100_000.0
+            EV.fire(sim, sim.rng, "drought", target=1, sev=2)
+            active = [e for e in sim.w["active_events"] if e.get("key") == "drought"]
+            self.assertEqual(len(active), 1)
+            uid = active[0].get("uid")
+            self.assertIsNotNone(uid)
+
+            choice = LD.EVENT_CHOICES["drought"][0]
+            treasury_before = sim.states[1]["treasury"]
+            self.assertTrue(EV.apply_event_choice(sim, uid, choice["id"]))
+            self.assertFalse(any(e.get("uid") == uid for e in sim.w["active_events"]))
+            self.assertLess(sim.states[1]["treasury"], treasury_before)
+            self.assertTrue(any(j.get("kind") == "event_choice" for j in sim.w["journal"]))
+            self.assertFalse(EV.apply_event_choice(sim, uid, choice["id"]))
+
+            # Квест із активної події можна прийняти, виконати й отримати виплату.
+            hooks = DT.generate_quest_hooks(sim, 1, limit=20)
+            hook = next(h for h in hooks if h.get("state_uk") == sim.states[1]["uk"])
+            quest = DT.accept_quest(sim, hook["id"], state_id=1)
+            self.assertIsNotNone(quest)
+            self.assertEqual(len(sim.w["quests"]["active"]), 1)
+            treasury_before = sim.states[1]["treasury"]
+            done = DT.complete_quest(sim, quest["quest_id"])
+            self.assertEqual(done["status"], "completed")
+            self.assertEqual(len(sim.w["quests"]["active"]), 0)
+            self.assertEqual(len(sim.w["quests"]["completed"]), 1)
+            self.assertEqual(sim.states[1]["treasury"], treasury_before - done["paid_zm"])
+
+            # Купівля зменшує й доступність, і реальний запас ринку.
+            retail = DT.city_retail_prices(sim, 1)
+            item = next(it for it in retail["items"] if it["available"] > 0)
+            market = sim.markets[retail["market_id"]]
+            stock_before = sum(market["stock"].get(int(g), 0.0) for g in item["stock"])
+            receipt = DT.purchase_shop_item(sim, 1, item["id"], 1)
+            self.assertTrue(receipt["ok"])
+            stock_after = sum(market["stock"].get(int(g), 0.0) for g in item["stock"])
+            self.assertLess(stock_after, stock_before)
+            retail2 = DT.city_retail_prices(sim, 1)
+            item2 = next(it for it in retail2["items"] if it["id"] == item["id"])
+            self.assertEqual(item2["available"], item["available"] - 1)
+
+            npc = DT.generate_npc(sim, state_id=1, role="купець")
+            self.assertEqual(npc["role"], "купець")
+            self.assertTrue(npc["name"])
+            self.assertTrue(npc["faction"])
+            self.assertEqual(DT.fmt_mm(101), "1 см 1 мм")
+
+    def test_long_horizon_invariants(self):
+        with tempfile.TemporaryDirectory() as td:
+            _, _, _, _, sim = _build_calibrated_test_world(td, seed=17)
+            tech_cap = float(sim.cfg("tech_cap", 3.0))
+            sim.run(120)
+            for mid, m in sim.markets.items():
+                for g, price in m["price"].items():
+                    base = sim.goods[g]["value"]
+                    self.assertTrue(math.isfinite(price), msg=f"market {mid} good {g}")
+                    self.assertGreaterEqual(price, E.PMIN * base * 0.99)
+                    self.assertLessEqual(price, E.PMAX * base * 1.01)
+                for g, stock in m["stock"].items():
+                    self.assertTrue(math.isfinite(stock), msg=f"market {mid} good {g}")
+                    self.assertGreaterEqual(stock, -1e-6, msg=f"market {mid} good {g}")
+            for sid, st in sim.states.items():
+                for key in ("treasury", "debt", "pop", "stability", "legitimacy", "tech"):
+                    self.assertTrue(math.isfinite(float(st.get(key, 0.0))), msg=f"state {sid} {key}")
+                self.assertLessEqual(float(st.get("tech", 1.0)), tech_cap + 1e-6)
+                self.assertGreaterEqual(float(st.get("tech", 1.0)), 0.0)
+                for unit, count in st.get("army", {}).items():
+                    self.assertGreaterEqual(count, 0, msg=f"state {sid} {unit}")
+            self.assertGreater(sum(st.get("pop", 0.0) for st in sim.states.values()), 0.0)
+
+    def test_long_horizon_balance_no_spiral_or_stock_dominance(self):
+        """Регресія: легітимність може відновлюватися, а один сировинний товар
+        не може назавжди витіснити всі інші з ринку."""
+        for seed in (42, 777):
+            with tempfile.TemporaryDirectory() as td:
+                # 1) Ізольований механізм: з мінімуму й без випадкових подій
+                #    держава повільно відновлює легітимність, а не лишається
+                #    заблокованою на 10 через старий жорсткий крок +/-.
+                _, _, _, _, sim = _build_calibrated_test_world(td, seed=seed)
+                sim.w["active_events"] = []
+                for st in sim.states.values():
+                    st["legitimacy"] = 10.0
+                for _ in range(60):
+                    sim.tick(events=False)
+                for sid, st in sim.states.items():
+                    self.assertGreater(
+                        st["legitimacy"], 40.0,
+                        msg=f"seed {seed} state {sid}: легітимність застрягла на мінімумі")
+
+                # 2) Звичайні події більше не створюють односторонню спіраль:
+                #    легітимність не просить усі 10 років на дні.
+                _, _, _, _, sim2 = _build_calibrated_test_world(td, seed=seed)
+                max_leg = {sid: 0.0 for sid in sim2.states}
+                pinned = {sid: 0 for sid in sim2.states}
+                months = 120
+                for _ in range(months):
+                    sim2.tick()
+                    for sid, st in sim2.states.items():
+                        max_leg[sid] = max(max_leg[sid], st["legitimacy"])
+                        if st["legitimacy"] <= 10.001:
+                            pinned[sid] += 1
+                for sid in sim2.states:
+                    self.assertGreater(max_leg[sid], 40.0,
+                                       msg=f"seed {seed} state {sid}: легітимність не відновилася")
+                    self.assertLess(pinned[sid], months // 4,
+                                    msg=f"seed {seed} state {sid}: легітимність застрягла на дні")
+
+                # 3) Переповнення складів не дає одному товару (наприклад,
+                #    коноплям) зайняти більшість усього ринкового запасу.
+                totals = {}
+                for m in sim2.markets.values():
+                    for g, qty in m["stock"].items():
+                        totals[g] = totals.get(g, 0.0) + float(qty or 0)
+                total = sum(totals.values())
+                self.assertGreater(total, 0.0)
+                share = max(totals.values()) / total
+                self.assertLess(share, 0.5,
+                                msg=f"seed {seed}: один товар тримає {share:.0%} усього запасу")
+
+    def test_report_outputs_are_dynamic_and_keep_unknown_notes(self):
+        with tempfile.TemporaryDirectory() as td:
+            _, _, _, _, sim = _build_calibrated_test_world(td, seed=23)
+            vault = os.path.join(td, "vault")
+            states_dir = os.path.join(vault, "Держави")
+            os.makedirs(states_dir, exist_ok=True)
+            user_note = os.path.join(states_dir, "Моя нотатка.md")
+            with open(user_note, "w", encoding="utf-8") as f:
+                f.write("Користувацька нотатка — не видаляти.\n")
+
+            RP.write_all(sim, vault)
+            for name in ("Квести.md", "Маршрути та небезпека.md", "Персонажі та фракції.md", "Правила симуляції.md"):
+                self.assertTrue(os.path.isfile(os.path.join(vault, name)), msg=name)
+            self.assertTrue(os.path.isfile(user_note))
+
+            with open(os.path.join(vault, "Правила симуляції.md"), encoding="utf-8") as f:
+                rules = f.read()
+            self.assertIn(f"{len(sim.states)} держав", rules)
+            self.assertIn(f"{len(sim.burgs)} міст", rules)
+            self.assertIn("carry_cap=", rules)
+            self.assertNotIn("73 держави", rules)
+
+            with open(os.path.join(vault, "Маршрути та небезпека.md"), encoding="utf-8") as f:
+                routes = f.read()
+            self.assertIn("Небезпека", routes)
+            self.assertIn("зустріч", routes.lower())
+
     def test_overrides_undo_and_slots(self):
         with tempfile.TemporaryDirectory() as td:
             _, wpath, jpath, _, _ = _build_calibrated_test_world(td, seed=5)
@@ -282,14 +500,24 @@ class TestFeriaSim(unittest.TestCase):
                     ("/api/overview", "undo_count"),
                     ("/api/map_geo", "states"),
                     ("/api/retail?burg=1", "items"),
+                    ("/api/shop?burg=1", "items"),
                     ("/api/route?from=1&to=3&mode=horse", "total_km"),
                     ("/api/quests", "quests"),
                     ("/api/slots", "slots"),
+                    ("/api/config", "config"),
+                    ("/api/event_choices", "events"),
+                    ("/api/quest_board", "hooks"),
+                    ("/api/npc", "npcs"),
                 ]:
                     with urllib.request.urlopen(base + ep, timeout=5) as r:
                         self.assertEqual(r.status, 200)
                         data = json.loads(r.read().decode("utf-8"))
                         self.assertIn(req_key, data, msg=ep)
+
+                with self.assertRaises(urllib.error.HTTPError) as bad:
+                    urllib.request.urlopen(base + "/api/state?id=abc", timeout=5)
+                self.assertEqual(bad.exception.code, 400)
+                self.assertIn("error", json.loads(bad.exception.read().decode("utf-8")))
 
                 def post_json(path, payload):
                     req = urllib.request.Request(
@@ -302,6 +530,50 @@ class TestFeriaSim(unittest.TestCase):
                         self.assertEqual(r.status, 200)
                         return json.loads(r.read().decode("utf-8"))
 
+                fire_r = post_json("/api/fire", {"key": "drought", "target": 1, "sev": 2})
+                self.assertTrue(fire_r["ok"])
+                with urllib.request.urlopen(base + "/api/event_choices", timeout=5) as r:
+                    choices_data = json.loads(r.read().decode("utf-8"))
+                drought = next(e for e in choices_data["events"] if e["key"] == "drought")
+                self.assertTrue(drought["choices"])
+                choice_r = post_json("/api/event_choice", {
+                    "uid": drought["uid"], "choice_id": drought["choices"][0]["id"],
+                })
+                self.assertTrue(choice_r["ok"])
+
+                cfg_r = post_json("/api/set_config", {"key": "event_rate", "value": 1.25})
+                self.assertTrue(cfg_r["ok"])
+                self.assertEqual(cfg_r["config"]["event_rate"], 1.25)
+
+                npc_r = post_json("/api/npc", {"state": 1, "role": "купець"})
+                self.assertTrue(npc_r["ok"])
+                self.assertEqual(npc_r["npc"]["role"], "купець")
+                with urllib.request.urlopen(base + "/api/npc", timeout=5) as r:
+                    self.assertEqual(len(json.loads(r.read().decode("utf-8"))["npcs"]), 1)
+
+                with urllib.request.urlopen(base + "/api/shop?burg=1", timeout=5) as r:
+                    shop = json.loads(r.read().decode("utf-8"))
+                buy_item = next(it for it in shop["items"] if it["available"] > 0)
+                buy_r = post_json("/api/shop_buy", {
+                    "burg": 1, "item": buy_item["id"], "qty": 1,
+                })
+                self.assertTrue(buy_r["ok"])
+                self.assertEqual(buy_r["receipt"]["qty"], 1)
+
+                with urllib.request.urlopen(base + "/api/quest_board", timeout=5) as r:
+                    board = json.loads(r.read().decode("utf-8"))
+                hook = board["hooks"][0]
+                q_accept = post_json("/api/quest_accept", {"id": hook["id"]})
+                self.assertTrue(q_accept["ok"])
+                q_id = q_accept["quest"]["quest_id"]
+                q_done = post_json("/api/quest_complete", {"id": q_id, "success": True})
+                self.assertTrue(q_done["ok"])
+                self.assertEqual(q_done["quest"]["status"], "completed")
+
+                fork_r = post_json("/api/fork", {"name": "Тестова гілка"})
+                self.assertTrue(fork_r["ok"])
+                self.assertTrue(any(s["id"] == fork_r["slot"]["id"] for s in fork_r["slots"]))
+
                 ov_r = post_json("/api/override", {"kind": "burg", "id": 1, "fields": {"uk": "Аурелія Нова"}})
                 self.assertTrue(ov_r["ok"])
                 st_r = post_json("/api/step", {"months": 1})
@@ -312,6 +584,149 @@ class TestFeriaSim(unittest.TestCase):
             finally:
                 srv.shutdown()
                 srv.server_close()
+
+    def test_web_security_hardening(self):
+        with tempfile.TemporaryDirectory() as td:
+            _, wpath, jpath, _, _ = _build_calibrated_test_world(td, seed=77)
+            app = web.AppState(wpath, jpath)
+            app.overrides_file = os.path.join(td, "overrides.json")
+
+            # Атомарний запис не псує цільовий файл і прибирає tmp при помилці.
+            atomic_target = os.path.join(td, "atomic.txt")
+            with open(atomic_target, "w", encoding="utf-8") as f:
+                f.write("old")
+            with mock.patch.object(web.os, "replace", side_effect=OSError("boom")):
+                with self.assertRaises(OSError):
+                    web._write_text_atomic(atomic_target, "new")
+            with open(atomic_target, encoding="utf-8") as f:
+                self.assertEqual(f.read(), "old")
+            self.assertFalse(os.path.exists(atomic_target + ".tmp"))
+
+            self.assertIn("[::1]:8765", web._expected_hosts("::1", 8765))
+            self.assertIn("127.0.0.1:8765", web._expected_hosts("::1", 8765))
+            self.assertEqual(web._host_key("[::1]"), "::1")
+
+            srv = web.ThreadingHTTPServer(("127.0.0.1", 0), web.make_handler(app))
+            t = threading.Thread(target=srv.serve_forever, daemon=True)
+            t.start()
+            try:
+                base = f"http://127.0.0.1:{srv.server_port}"
+
+                def request(path, data=None, headers=None, method=None):
+                    req = urllib.request.Request(base + path, data=data, headers=headers or {}, method=method)
+                    return urllib.request.urlopen(req, timeout=10)
+
+                # Небезпечні ідентифікатори слотів не можуть вийти за межі каталогу save/slots.
+                for bad_id in ("..", ".", "a/b", "../world"):
+                    body = json.dumps({"id": bad_id}).encode("utf-8")
+                    res = json.loads(request("/api/delete_slot", body,
+                                             {"Content-Type": "application/json"}, "POST").read())
+                    self.assertIn("error", res)
+                self.assertTrue(os.path.exists(wpath))
+
+                # Слоти отримують унікальні ID навіть у межах однієї секунди.
+                s1 = json.loads(request("/api/save_slot", b'{"name":"A"}',
+                                        {"Content-Type": "application/json"}, "POST").read())
+                s2 = json.loads(request("/api/save_slot", b'{"name":"A"}',
+                                        {"Content-Type": "application/json"}, "POST").read())
+                self.assertNotEqual(s1["slot"]["id"], s2["slot"]["id"])
+                self.assertTrue(s1["ok"] and s2["ok"])
+
+                # NaN/Infinity у JSON і в рядковому вигляді відхиляються.
+                with self.assertRaises(urllib.error.HTTPError) as bad_nan:
+                    request("/api/set_state", b'{"id":1,"field":"treasury","value":NaN}',
+                            {"Content-Type": "application/json"}, "POST")
+                self.assertEqual(bad_nan.exception.code, 400)
+                res = json.loads(request("/api/set_state",
+                                         b'{"id":1,"field":"treasury","value":"nan"}',
+                                         {"Content-Type": "application/json"}, "POST").read())
+                self.assertIn("error", res)
+                self.assertTrue(math.isfinite(app.sim.states[1]["treasury"]))
+
+                # Origin з іншого сайту та чужий Host відхиляються.
+                with self.assertRaises(urllib.error.HTTPError) as bad_origin:
+                    request("/api/set_config", b'{"key":"event_rate","value":1.7}',
+                            {"Content-Type": "text/plain", "Origin": "https://evil.example"}, "POST")
+                self.assertEqual(bad_origin.exception.code, 403)
+                self.assertEqual(app.sim.cfg("event_rate"), 1.0)
+                with self.assertRaises(urllib.error.HTTPError) as bad_host:
+                    request("/api/overview", headers={"Host": "evil.example"})
+                self.assertEqual(bad_host.exception.code, 403)
+
+                # IPv6-форма Host для localhost є прийнятною.
+                ok_ipv6 = json.loads(request("/api/overview", headers={
+                    "Host": f"[::1]:{srv.server_port}"}).read())
+                self.assertIn("states", ok_ipv6)
+
+                # Порожня лояльність провінції ігнорується, а не ламає правку.
+                province_id = next(iter(app.sim.provinces))
+                blank_loyalty = json.dumps({"kind": "province", "id": province_id,
+                                            "fields": {"loyalty": ""}}).encode("utf-8")
+                res = json.loads(request("/api/override", blank_loyalty,
+                                         {"Content-Type": "application/json"}, "POST").read())
+                self.assertTrue(res.get("ok"))
+
+                # Ліміт журналу справді застосовується.
+                for i in range(8):
+                    app.sim.log("test", f"record {i}")
+                app.save()
+                res = json.loads(request("/api/journal?limit=3").read())
+                self.assertEqual(len(res["rows"]), 3)
+
+                # Стиснену карту, що роздувається понад ліміт, не імпортуємо.
+                bomb = gzip.compress(b"\0" * (70 * 1024 * 1024))
+                payload = json.dumps({"filename": "bomb.map.gz",
+                                      "content_b64": base64.b64encode(bomb).decode("ascii")}).encode("utf-8")
+                res = json.loads(request("/api/upload_map", payload,
+                                         {"Content-Type": "application/json"}, "POST").read())
+                self.assertIn("error", res)
+                self.assertIn("занадто", res["error"])
+            finally:
+                srv.shutdown()
+                srv.server_close()
+
+    def test_cli_new_commands_and_undo(self):
+        with tempfile.TemporaryDirectory() as td:
+            _, wpath, jpath, gpath, _ = _build_calibrated_test_world(td, seed=31)
+            with mock.patch.multiple(cli, WORLD_FILE=wpath, JOURNAL_FILE=jpath,
+                                     GEO_FILE=gpath, _APP=None):
+                def run(*args):
+                    buf = io.StringIO()
+                    with contextlib.redirect_stdout(buf):
+                        cli.main(list(args))
+                    return buf.getvalue()
+
+                self.assertIn("event_rate", run("config", "get", "event_rate"))
+                run("config", "set", "carry_cap", "1.8")
+                app = cli.get_app()
+                self.assertEqual(app.sim.w["config"]["carry_cap"], 1.8)
+
+                npc_out = run("npc", "--state", app.sim.states[1]["uk"], "--role", "купець")
+                self.assertIn("купець", npc_out)
+                self.assertEqual(len(app.sim.w["npcs"]), 1)
+
+                hook = app.quest_board()["hooks"][0]
+                self.assertIn("Прийнято", run("quests", "accept", hook["id"]))
+                active = app.sim.w["quests"]["active"]
+                self.assertEqual(len(active), 1)
+                run("quests", "complete", str(active[0]["quest_id"]))
+                self.assertEqual(len(app.sim.w["quests"]["completed"]), 1)
+
+                retail = DT.city_retail_prices(app.sim, 1)
+                item = next(it for it in retail["items"] if it["available"] > 0)
+                self.assertIn("Куплено", run("shop", app.sim.burgs[1]["uk"], item["id"], "--qty", "1"))
+
+                run("fork", "CLI гілка")
+                self.assertTrue(any(s.get("fork") for s in app.list_slots()))
+
+                run("fire", "drought", "--target", app.sim.states[1]["uk"], "--sev", "2")
+                ev = next(e for e in app.sim.w["active_events"] if e["key"] == "drought")
+                run("choice", str(ev["uid"]), LD.EVENT_CHOICES["drought"][0]["id"])
+                self.assertFalse(any(e.get("uid") == ev["uid"] for e in app.sim.w["active_events"]))
+
+                undo_before = app.overview()["undo_count"]
+                run("undo")
+                self.assertLess(app.overview()["undo_count"], undo_before)
 
     def test_epidemic_burnout_and_population_recovery(self):
         with tempfile.TemporaryDirectory() as td:
@@ -451,6 +866,181 @@ class TestFeriaSim(unittest.TestCase):
             self.assertTrue(len(quests) >= 1)
             md = RP.province_text(app.sim, 4)
             self.assertIn("Пилоград", md)
+
+    def test_audit_core_safety(self):
+        with tempfile.TemporaryDirectory() as td:
+            bad_path = os.path.join(td, "bad.json")
+            with self.assertRaises(ValueError):
+                E.save_world({"treasury": float("nan")}, bad_path)
+            self.assertFalse(os.path.exists(bad_path))
+
+            bomb = os.path.join(td, "bomb.map.gz")
+            with open(bomb, "wb") as f:
+                f.write(gzip.compress(b"\0" * (70 * 1024 * 1024)))
+            with self.assertRaises(ValueError):
+                IM.import_map(bomb)
+
+            _, _, _, _, sim = _build_calibrated_test_world(td, seed=101)
+            cfg = json.dumps(sim.w["config"], sort_keys=True)
+            stock = {mid: dict(m["stock"]) for mid, m in sim.markets.items()}
+            date = dict(sim.w["date"])
+            WG.calibrate(sim, log=lambda *_: None, warm_iters=5, months_per=2)
+            self.assertEqual(json.dumps(sim.w["config"], sort_keys=True), cfg)
+            self.assertEqual(sim.w["date"], date)
+            self.assertEqual({mid: dict(m["stock"]) for mid, m in sim.markets.items()}, stock)
+
+            sample_map, _, _, _, _ = _build_calibrated_test_world(td, seed=103)
+            with open(sample_map, encoding="utf-8") as f:
+                parsed = IM._parse_multiline_map(f.read(), sample_map)
+            parsed["states_raw"] = {"1": {"name": "A"}, "2": {"name": "B"}}
+            parsed["provinces_raw"] = {"1": {"name": "P"}, "2": {"name": "Q"}}
+            malformed = os.path.join(td, "malformed.map")
+            with open(malformed, "w", encoding="utf-8") as f:
+                f.write("not json")
+            with mock.patch.object(IM, "_parse_multiline_map", lambda *_: dict(parsed)):
+                # Хибні словники мають відхилятися як ValueError, а не падати з TypeError
+                # ще до перевірки типу (historical bug: states_raw[1:] / provinces_raw[1:]).
+                with self.assertRaises(ValueError):
+                    IM.import_map(malformed)
+
+    def test_ai_war_declarations_are_reachable(self):
+        """Регресія: AI має оголошувати війни навіть без подій, а сусідські
+        відносини не повинні назавжди лишатися дружніми."""
+        wars_total = 0
+        max_relation = -101.0
+        for seed in range(1, 13):
+            with tempfile.TemporaryDirectory() as td:
+                _, _, _, _, sim = _build_calibrated_test_world(td, seed=seed)
+                sim.w["config"]["war_rate"] = 30.0
+                sim.w["active_events"] = []
+                for _ in range(360):
+                    sim.tick(events=False)
+                wars_total += len(sim.w.get("war_history") or [])
+                if 1 in sim.states and 2 in sim.states:
+                    max_relation = max(max_relation, PO.rel_get(sim, 1, 2))
+        self.assertGreater(wars_total, 0, msg="AI жодного разу не оголосив війну без подій")
+        self.assertLess(max_relation, 55.0,
+                        msg=f"відносини сусідів лишаються дружніми: {max_relation}")
+
+    def test_audit_politics_and_events_safety(self):
+        with tempfile.TemporaryDirectory() as td:
+            _, _, _, _, sim = _build_calibrated_test_world(td, seed=131)
+            sim.w["wars"] = []
+            sim.w["war_history"] = []
+            sim.w["active_events"] = []
+            rng = random.Random(4)
+
+            wr1 = PO.declare_war(sim, 1, 2, rng)
+            wr2 = PO.declare_war(sim, 1, 2, rng)
+            self.assertIs(wr1, wr2)
+            self.assertEqual(len(sim.w["wars"]), 1)
+            PO.end_war(sim, wr1, rng)
+            self.assertIsNone(PO.declare_war(sim, 1, 2, rng))
+
+            bad_choice = {"id": "evil", "label": "Evil",
+                          "effects": {"state": {"capital": 999, "treasury": 50}}}
+            sim.w["active_events"] = [dict(
+                uid=9001, key="audit_evil", states=[1], sev=1,
+                until=sim.tick_index() + 5, title="Хибна подія", target="", text="",
+            )]
+            capital = sim.states[1]["capital"]
+            with mock.patch.dict(LD.EVENT_CHOICES, {"audit_evil": [bad_choice]}):
+                self.assertFalse(EV.apply_event_choice(sim, 9001, "evil"))
+            self.assertEqual(sim.states[1]["capital"], capital)
+
+            sim.w["active_events"] = [dict(
+                uid=9002, key="audit_stale", states=[1], sev=1,
+                title="Подія без терміну", target="", text="",
+            )]
+            EV.step_events(sim, rng)
+            self.assertFalse(any(e.get("uid") == 9002 for e in sim.w["active_events"]))
+
+            sim.states[1]["ruler"]["traits"] = []
+            sim.w["active_events"] = [dict(
+                uid=9003, key="trade_boom", states=[1], sev=1,
+                until=sim.tick_index() + 5, title="Торговий бум", target="", text="",
+            )]
+            self.assertTrue(EV.apply_event_choice(sim, 9003, "lower_tariff"))
+            sim._index_mods()
+            PO.sync_ruler_fields(sim)
+            self.assertGreater(sim.states[1]["trade_mod"], 1.0)
+
+    def test_audit_dnd_report_and_cli_safety(self):
+        with tempfile.TemporaryDirectory() as td:
+            _, _, _, _, sim = _build_calibrated_test_world(td, seed=137)
+            sim.states[1]["treasury"] = 100_000.0
+            retail = DT.city_retail_prices(sim, 1)
+            item = next(it for it in retail["items"] if it["available"] > 0)
+            market = sim.markets[retail["market_id"]]
+            reserved = dict(market.get("shop_reserved") or {})
+            receipt = DT.purchase_shop_item(sim, 1, item["id"], 1)
+            self.assertTrue(receipt["ok"])
+            self.assertEqual(market.get("shop_reserved") or {}, reserved)
+
+            hook = next(h for h in DT.generate_quest_hooks(sim, 1, limit=20)
+                        if h.get("state_uk") == sim.states[1]["uk"])
+            quest = DT.accept_quest(sim, hook["id"], state_id=1)
+            self.assertIsNotNone(quest)
+            again = DT.accept_quest(sim, hook["id"], state_id=1)
+            self.assertEqual(again["quest_id"], quest["quest_id"])
+            self.assertEqual(len(sim.w["quests"]["active"]), 1)
+            treasury = sim.states[1]["treasury"]
+            failed = DT.complete_quest(sim, quest["quest_id"], success=False)
+            self.assertEqual(failed.get("paid_zm", 0), 0)
+            self.assertEqual(sim.states[1]["treasury"], treasury)
+
+            vault = os.path.join(td, "vault")
+            os.makedirs(vault, exist_ok=True)
+            sim.w["journal"] = [
+                dict(y="../../evil", m=1, kind="x", text="небезпечно"),
+                dict(y=1250, m=1, kind="x", text="**жирний** [текст](url)"),
+            ]
+            RP.write_journal(sim, vault, "hdr")
+            self.assertFalse(os.path.exists(os.path.join(td, "evil.md")))
+            journal_file = os.path.join(vault, "Журнал", "1250.md")
+            with open(journal_file, encoding="utf-8") as f:
+                content = f.read()
+            self.assertIn(r"\*\*жирний\*\*", content)
+            self.assertIn(r"\[текст\](url)", content)
+
+            mpath = os.path.join(td, "testia.map")
+            world_file = os.path.join(td, "world.json")
+            journal_file_cli = os.path.join(td, "journal.jsonl")
+            with open(world_file, "w", encoding="utf-8") as f:
+                f.write("old world")
+            with open(journal_file_cli, "w", encoding="utf-8") as f:
+                f.write("old journal\n")
+            args = argparse.Namespace(map=mpath, seed=1, year=1250, era="Н.Е.")
+            with mock.patch.multiple(cli, WORLD_FILE=world_file, JOURNAL_FILE=journal_file_cli,
+                                     SAVE_DIR=td, OVERRIDES=os.path.join(td, "overrides.json")), \
+                    mock.patch.object(cli.WG, "calibrate", lambda *a, **k: None), \
+                    mock.patch.object(cli.E, "save_world", side_effect=OSError("boom")):
+                with self.assertRaises(OSError):
+                    cli.cmd_init(args)
+            with open(world_file, encoding="utf-8") as f:
+                self.assertEqual(f.read(), "old world")
+            with open(journal_file_cli, encoding="utf-8") as f:
+                self.assertEqual(f.read(), "old journal\n")
+
+    def test_ui_templates_escape_dynamic_values(self):
+        with open(web.UI_FILE, encoding="utf-8") as f:
+            html = f.read()
+        self.assertIn("function jsArg", html)
+        self.assertIn("chooseEvent(${jsArg(e.uid)},${jsArg(c.id)})", html)
+        self.assertIn("loadSlot(${jsArg(s.id)})", html)
+        self.assertIn("deleteSlot(${jsArg(s.id)})", html)
+        self.assertIn("syncCfgNum(this,${jsArg(f.key)})", html)
+        self.assertIn("syncCfgRange(this,${jsArg(f.key)})", html)
+        self.assertNotIn("chooseEvent('${escHtml(e.uid)}'", html)
+        self.assertNotIn("loadSlot('${escHtml(s.id)}'", html)
+        self.assertNotIn("acceptQuest('${escHtml(h.id)}'", html)
+        handlers = re.findall(r'on[a-z]+="[^"]*"', html)
+        self.assertTrue(handlers)
+        for attr in handlers:
+            for expr in re.findall(r'\$\{([^}]*)\}', attr):
+                self.assertTrue(expr.startswith("jsArg(") and expr.endswith(")"), attr)
+        self.assertIn("D&D", html)
+        self.assertIn("/api/map_geo", html)
 
 
 if __name__ == "__main__":
