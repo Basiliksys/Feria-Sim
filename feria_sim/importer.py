@@ -11,23 +11,105 @@
 """
 import collections
 import gzip
+import io
 import json
 import math
 import os
 import random
 import re
 
+from . import lore_data as LD
+
 BULK_RATE = 100.0   # од. сировини на 1000 селян/міс при biomeOutput = 1
 POINT_RATE = 18.0   # од. на 1000 селян/міс для «точкових» ресурсів клітинки
 
+# Межі для недовірених .map-файлів: захист від decompression bomb та надто великих файлів.
+MAX_MAP_RAW_BYTES = 64 * 1024 * 1024
+MAX_MAP_TEXT_BYTES = 64 * 1024 * 1024
+MAX_MAP_DIMENSION = 16384
+_GZIP_CHUNK = 1 << 20
+
+
+def _num(value, default=0.0, lo=None, hi=None):
+    """Скінченне число з фолбеком іoptional range-клампом (імпортний кордон)."""
+    try:
+        v = float(value)
+    except (TypeError, ValueError, OverflowError):
+        return default
+    if not math.isfinite(v):
+        return default
+    if lo is not None and v < lo:
+        v = lo
+    if hi is not None and v > hi:
+        v = hi
+    return v
+
+
+def _integer(value, default=0, lo=None, hi=None):
+    return int(_num(value, default, lo, hi))
+
+
+def _optional_int(value, lo=None, hi=None):
+    v = _num(value, None, lo, hi)
+    return None if v is None else int(v)
+
+
+def _sanitize_numbers(obj):
+    """Рекурсивно замінює NaN/inf на 0 (останній рубіж перед світом)."""
+    if isinstance(obj, float):
+        return obj if math.isfinite(obj) else 0.0
+    if isinstance(obj, dict):
+        return {k: _sanitize_numbers(v) for k, v in obj.items()}
+    if isinstance(obj, list):
+        return [_sanitize_numbers(v) for v in obj]
+    if isinstance(obj, tuple):
+        return tuple(_sanitize_numbers(v) for v in obj)
+    return obj
+
+
+def _normalize_geo(geo):
+    if not isinstance(geo, dict):
+        geo = {}
+    return {
+        "latN": _num(geo.get("latN"), 60.0, -90.0, 90.0),
+        "latS": _num(geo.get("latS"), -60.0, -90.0, 90.0),
+    }
+
+
+def _normalize_units(units):
+    if not isinstance(units, dict):
+        units = {}
+    d = units.get("distance")
+    if not isinstance(d, dict):
+        d = {}
+    return {"distance": {
+        "unit": str(d.get("unit") or "km"),
+        "scale": _num(d.get("scale"), 3.0, 1e-6, 1000.0),
+    }}
+
 # Попит, якого може не бути у .map (злитки, ремесло, гроші) — інакше їх ціна «провалюється».
 EXTRA_COVERAGE = {
-    4: {"military": 0.15}, 5: {"utilities": 0.15}, 6: {"utilities": 0.15},
-    7: {"luxury": 0.4}, 8: {"luxury": 0.5}, 21: {"utilities": 0.3}, 23: {"luxury": 0.5},
-    24: {"luxury": 0.5}, 28: {"utilities": 0.3}, 33: {"military": 0.3},
-    49: {"luxury": 0.3}, 50: {"luxury": 0.2}, 57: {"military": 0.25},
-    52: {"military": 0.5}, 62: {"luxury": 0.5}, 63: {"luxury": 1.0}, 32: {"utilities": 0.4},
-    43: {"utilities": 0.3}, 48: {"utilities": 0.5}, 31: {"utilities": 1.0}, 36: {"luxury": 1.0},
+    LD.GOOD_IDS["iron"]: {"military": 0.15},
+    LD.GOOD_IDS["copper"]: {"utilities": 0.15},
+    LD.GOOD_IDS["tin"]: {"utilities": 0.15},
+    LD.GOOD_IDS["silver"]: {"luxury": 0.4},
+    LD.GOOD_IDS["gold"]: {"luxury": 0.5},
+    LD.GOOD_IDS["hemp"]: {"utilities": 0.3},
+    LD.GOOD_IDS["gemstones"]: {"luxury": 0.5},
+    LD.GOOD_IDS["dyes"]: {"luxury": 0.5},
+    LD.GOOD_IDS["amber"]: {"utilities": 0.3},
+    LD.GOOD_IDS["saltpeter"]: {"military": 0.3},
+    LD.GOOD_IDS["paper"]: {"luxury": 0.3},
+    LD.GOOD_IDS["ink"]: {"luxury": 0.2},
+    LD.GOOD_IDS["bronze"]: {"military": 0.25},
+    LD.GOOD_IDS["sails"]: {"military": 0.5},
+    LD.GOOD_IDS["coins"]: {"luxury": 0.5},
+    LD.GOOD_IDS["jewelry"]: {"luxury": 1.0},
+    LD.GOOD_IDS["tar"]: {"utilities": 0.4},
+    LD.GOOD_IDS["leather"]: {"utilities": 0.3},
+    LD.GOOD_IDS["ropes"]: {"utilities": 0.5},
+    LD.GOOD_IDS["slaves"]: {"utilities": 1.0},
+    LD.GOOD_IDS["mahogany"]: {"luxury": 1.0},
 }
 
 DEFAULT_BIOMES = [
@@ -52,7 +134,17 @@ DEFAULT_GOODS_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "g
 def _arr(line):
     if not line or not line.strip():
         return []
-    return [int(float(x)) for x in line.rstrip(",").split(",") if x.strip() != ""]
+    out = []
+    for x in line.rstrip(",").split(","):
+        if not x.strip():
+            continue
+        try:
+            v = float(x)
+        except (TypeError, ValueError, OverflowError):
+            continue
+        if math.isfinite(v):
+            out.append(int(v))
+    return out
 
 
 def _clean(s):
@@ -91,17 +183,43 @@ def _load_default_goods():
 
 
 def read_map_text(path):
+    """Читає .map з жорсткими лімітами на сирий і розпакований розмір."""
     with open(path, "rb") as f:
-        raw = f.read()
+        raw = f.read(MAX_MAP_RAW_BYTES + 1)
+    if len(raw) > MAX_MAP_RAW_BYTES:
+        raise ValueError(
+            f"Файл карти занадто великий (>{MAX_MAP_RAW_BYTES} байтів): {path}"
+        )
     if raw[:2] == b"\x1f\x8b":
-        raw = gzip.decompress(raw)
+        # Потокове розпакування: зупиняємося одразу після перевищення ліміту,
+        # щоб decompression bomb не з'їла всю пам'ять.
+        dec = gzip.GzipFile(fileobj=io.BytesIO(raw))
+        parts, total = [], 0
+        try:
+            while True:
+                chunk = dec.read(_GZIP_CHUNK)
+                if not chunk:
+                    break
+                total += len(chunk)
+                if total > MAX_MAP_TEXT_BYTES:
+                    raise ValueError(
+                        f"Розпакована карта занадто велика (>{MAX_MAP_TEXT_BYTES} байтів): {path}"
+                    )
+                parts.append(chunk)
+        finally:
+            dec.close()
+        raw = b"".join(parts)
+    if len(raw) > MAX_MAP_TEXT_BYTES:
+        raise ValueError(
+            f"Карта занадто велика (>{MAX_MAP_TEXT_BYTES} байтів): {path}"
+        )
     return raw.decode("utf-8", errors="replace")
 
 
 def _parse_settings(lines, source_name):
-    head = lines[0].split("|")
-    width = int(float(head[4])) if len(head) > 4 and head[4].replace(".", "", 1).isdigit() else 1600
-    height = int(float(head[5])) if len(head) > 5 and head[5].replace(".", "", 1).isdigit() else 800
+    head = lines[0].split("|") if lines else []
+    width = _integer(head[4], 1600, 1, MAX_MAP_DIMENSION) if len(head) > 4 else 1600
+    height = _integer(head[5], 800, 1, MAX_MAP_DIMENSION) if len(head) > 5 else 800
     world_name = os.path.splitext(os.path.basename(source_name))[0]
     map_year = None
     geo = {"latN": 60.0, "latS": -60.0}
@@ -110,26 +228,34 @@ def _parse_settings(lines, source_name):
 
     s1 = _try_json(lines[1]) if len(lines) > 1 else None
     if isinstance(s1, dict):
-        width = int(s1.get("graph", {}).get("width") or width)
-        height = int(s1.get("graph", {}).get("height") or height)
-        geo = s1.get("geography", {}).get("coordinates") or geo
-        units = s1.get("units") or units
-        lore = s1.get("lore") or {}
+        graph = s1.get("graph")
+        if isinstance(graph, dict):
+            width = _integer(graph.get("width"), width, 1, MAX_MAP_DIMENSION)
+            height = _integer(graph.get("height"), height, 1, MAX_MAP_DIMENSION)
+        geography = s1.get("geography")
+        coords = geography.get("coordinates") if isinstance(geography, dict) else None
+        if isinstance(coords, dict):
+            geo = coords
+        u = s1.get("units")
+        if isinstance(u, dict):
+            units = u
+        lore = s1.get("lore")
+        if not isinstance(lore, dict):
+            lore = {}
         if lore.get("name"):
-            world_name = lore["name"]
-        map_year = (lore.get("calendar") or {}).get("year")
+            world_name = str(lore["name"])
+        calendar = lore.get("calendar")
+        if isinstance(calendar, dict) and calendar.get("year") is not None:
+            map_year = _optional_int(calendar.get("year"), -100000, 100000)
     elif len(lines) > 1 and "|" in lines[1]:
         parts = lines[1].split("|")
-        try:
-            scale = float(parts[1]) if len(parts) > 1 and parts[1] else 3.0
-        except Exception:
-            scale = 3.0
+        scale = _num(parts[1] if len(parts) > 1 and parts[1] else 3.0, 3.0, 1e-6, 1000.0)
         units = {"distance": {"unit": parts[0] or "km", "scale": scale}}
         for p in parts:
             if p.strip().startswith("{"):
                 opt = _try_json(p)
                 if isinstance(opt, dict) and opt.get("name"):
-                    world_name = opt["name"]
+                    world_name = str(opt["name"])
         if len(parts) > 11 and parts[11] and not parts[11].startswith("{"):
             world_name = parts[11]
         if len(lines) > 2:
@@ -139,17 +265,30 @@ def _parse_settings(lines, source_name):
 
     for i in range(1, min(len(lines), 10)):
         obj = _try_json(lines[i])
+        found = None
         if isinstance(obj, list) and obj and isinstance(obj[0], dict) and "habitability" in obj[0]:
-            biomes = obj
-            break
-        if isinstance(obj, dict) and "habitability" in obj and "name" in obj:
-            habs = obj.get("habitability", [])
-            names = obj.get("name", [])
-            biomes = [{"i": k, "name": names[k] if k < len(names) else f"Biome {k}",
-                       "habitability": habs[k]} for k in range(len(habs))]
+            found = obj
+        elif isinstance(obj, dict) and "habitability" in obj and "name" in obj:
+            habs, names = obj.get("habitability"), obj.get("name")
+            if isinstance(habs, (list, tuple)):
+                names = names if isinstance(names, (list, tuple)) else []
+                found = [{"i": k, "name": str(names[k]) if k < len(names) else f"Biome {k}",
+                          "habitability": habs[k]} for k in range(len(habs))]
+        if found is not None:
+            biomes = found
             break
 
-    return head, width, height, geo, units, world_name, map_year, biomes
+    norm_biomes = []
+    for k, bi in enumerate(biomes if isinstance(biomes, (list, tuple)) else []):
+        if not isinstance(bi, dict):
+            continue
+        norm_biomes.append({
+            "i": _integer(bi.get("i"), k, 0, 10000),
+            "name": str(bi.get("name", f"Biome {k}")),
+            "habitability": _num(bi.get("habitability"), 0.0, 0.0, 100000.0),
+        })
+    biomes = norm_biomes or list(DEFAULT_BIOMES)
+    return head, width, height, _normalize_geo(geo), _normalize_units(units), world_name, map_year, biomes
 
 
 def _parse_multiline_map(text, source_name):
@@ -263,28 +402,35 @@ def _parse_multiline_map(text, source_name):
 
 
 def _parse_fmg_json(data, source_name):
-    info = data.get("info") or {}
-    settings = data.get("settings") or {}
-    pack = data.get("pack") or {}
-    cells = pack.get("cells") or {}
-    width = int(info.get("width") or settings.get("width") or 1600)
-    height = int(info.get("height") or settings.get("height") or 800)
+    if not isinstance(data, dict):
+        data = {}
+    info = data.get("info")
+    settings = data.get("settings")
+    pack = data.get("pack")
+    cells = pack.get("cells") if isinstance(pack, dict) else None
+    info = info if isinstance(info, dict) else {}
+    settings = settings if isinstance(settings, dict) else {}
+    pack = pack if isinstance(pack, dict) else {}
+    cells = cells if isinstance(cells, dict) else {}
+    width = _integer(info.get("width") or settings.get("width"), 1600, 1, MAX_MAP_DIMENSION)
+    height = _integer(info.get("height") or settings.get("height"), 800, 1, MAX_MAP_DIMENSION)
     world_name = info.get("mapName") or settings.get("mapName") or os.path.splitext(os.path.basename(source_name))[0]
     coords = data.get("mapCoordinates") or settings.get("mapCoordinates") or {"latN": 60.0, "latS": -60.0}
-    dist_scale = float(settings.get("distanceScale") or 3.0)
+    dist_scale = _num(settings.get("distanceScale"), 3.0, 1e-6, 1000.0)
     dist_unit = settings.get("distanceUnit") or "km"
-    biomes_data = data.get("biomesData") or {}
-    if isinstance(biomes_data, dict) and "habitability" in biomes_data:
+    biomes_data = data.get("biomesData")
+    if isinstance(biomes_data, dict) and isinstance(biomes_data.get("habitability"), (list, tuple)):
         habs = biomes_data["habitability"]
-        names = biomes_data.get("name", [])
-        biomes = [{"i": k, "name": names[k] if k < len(names) else f"Biome {k}", "habitability": habs[k]}
-                  for k in range(len(habs))]
+        names = biomes_data.get("name")
+        names = names if isinstance(names, (list, tuple)) else []
+        biomes = [{"i": k, "name": str(names[k]) if k < len(names) else f"Biome {k}",
+                   "habitability": _num(habs[k], 0.0, 0.0, 100000.0)} for k in range(len(habs))]
     else:
         biomes = list(DEFAULT_BIOMES)
 
     return dict(
         head=[info.get("version", "json"), "FMG JSON", info.get("exportedAt", ""), str(info.get("seed", "1"))],
-        width=width, height=height, geo=coords, units={"distance": {"unit": dist_unit, "scale": dist_scale}},
+        width=width, height=height, geo=_normalize_geo(coords), units=_normalize_units({"distance": {"unit": dist_unit, "scale": dist_scale}}),
         world_name=world_name, map_year=None, biomes=biomes,
         features=pack.get("features") or [], cultures=pack.get("cultures") or [{"i": 0, "name": "Wildlands", "type": "Generic"}],
         states_raw=pack.get("states") or [], burgs_raw=pack.get("burgs") or [{}],
@@ -308,7 +454,9 @@ def _synthesize_economy(burgs, states, biomes, cultures, c_biome, c_state, width
     point_goods = [g["i"] for g in goods_raw if g.get("chance", 0) > 0 and not g.get("biomeOutput")]
     weights = [g["chance"] for g in goods_raw if g.get("chance", 0) > 0 and not g.get("biomeOutput")]
     if not point_goods:
-        point_goods = [2, 4, 5, 6, 7, 8, 16, 23, 34, 41]
+        point_goods = [LD.GOOD_IDS[n] for n in (
+            "stone", "iron", "copper", "tin", "silver", "gold", "salt", "gemstones", "coal", "clay"
+        )]
         weights = [1] * len(point_goods)
     c_goods = [0] * n_cells
     for c in range(n_cells):
@@ -371,7 +519,7 @@ def _synthesize_economy(burgs, states, biomes, cultures, c_biome, c_state, width
         picks = rng.sample(crafted, min(k, len(crafted)))
         slots = []
         for g in picks:
-            if g["i"] in (52, 53) and not b["port"]:
+            if g["i"] in (LD.GOOD_IDS["sails"], LD.GOOD_IDS["ships"]) and not b["port"]:
                 continue
             rec = {int(rk): rv for rk, rv in g["recipes"][0].items()}
             units = round(max(1.0, (b["pop"] / 3000.0) * (1.5 if b["capital"] else 1.0)), 2)
@@ -424,60 +572,111 @@ def import_map(path):
 
     # ---------------- держави
     states = {}
-    for s in states_raw[1:] if len(states_raw) > 1 else states_raw:
+    source_states = states_raw if isinstance(states_raw, (list, tuple)) else []
+    if len(source_states) > 1:
+        source_states = source_states[1:]
+    for s in source_states:
         if not isinstance(s, dict) or not s.get("name") or s.get("removed"):
             continue
+        sid = _optional_int(s.get("i"), 0, 1000000)
+        if sid is None:
+            continue
         army = collections.Counter()
-        for r in s.get("military", []):
-            for u, n in (r.get("u") or {}).items():
-                army[u] += n
+        military = s.get("military")
+        if not isinstance(military, (list, tuple)):
+            military = []
+        for r in military:
+            if not isinstance(r, dict):
+                continue
+            units = r.get("u")
+            if not isinstance(units, dict):
+                continue
+            for u, n in units.items():
+                army[u] += _num(n, 0.0, 0.0, 1e7)
         if not army:
-            pop_hint = max(1.0, (s.get("urban", 0) or 0) + (s.get("rural", 0) or 0))
+            pop_hint = max(1.0, _num(s.get("urban"), 0.0, 0.0, 1e9) + _num(s.get("rural"), 0.0, 0.0, 1e9))
             army["infantry"] = max(200, int(pop_hint * 6))
             army["archers"] = max(80, int(pop_hint * 2))
         diplo = {}
-        for j, lab in enumerate(s.get("diplomacy", [])):
-            if j and j != s["i"] and lab != "x":
-                diplo[j] = lab
-        states[s["i"]] = dict(
-            id=s["i"], name=s["name"], full_name=s.get("fullName", s["name"]),
-            form=s.get("form", "Monarchy"), capital=s.get("capital", 0), culture=s.get("culture", 0),
-            expansionism=s.get("expansionism", 1), sales_tax=s.get("salesTax", 0.04),
-            poll_tax=s.get("pollTax", 0.1), treasury_map=s.get("treasury", 0), color=s.get("color", "#888"),
-            neighbors=[n for n in s.get("neighbors", [])], urban_k=s.get("urban", 0), rural_k=s.get("rural", 0),
-            area=s.get("area", 0), pole=s.get("pole"), provinces=s.get("provinces", []),
-            army=dict(army), alert=s.get("alert", 1), diplo_labels=diplo,
-            campaigns=s.get("campaigns", []), regiments=len(s.get("military", [])),
+        diplomacy = s.get("diplomacy")
+        if isinstance(diplomacy, (list, tuple)):
+            for j, lab in enumerate(diplomacy):
+                if j and j != sid and lab != "x":
+                    diplo[j] = lab
+        neighbors = s.get("neighbors")
+        provinces_raw_states = s.get("provinces")
+        campaigns = s.get("campaigns")
+        states[sid] = dict(
+            id=sid, name=str(s["name"]), full_name=str(s.get("fullName") or s["name"]),
+            form=s.get("form", "Monarchy"), capital=_integer(s.get("capital"), 0, 0, 1000000),
+            culture=_integer(s.get("culture"), 0, 0, 1000000),
+            expansionism=_num(s.get("expansionism"), 1.0, 0.0, 10.0),
+            sales_tax=_num(s.get("salesTax"), 0.04, 0.0, 1.0),
+            poll_tax=_num(s.get("pollTax"), 0.1, 0.0, 1.0),
+            treasury_map=_num(s.get("treasury"), 0.0, -1e12, 1e12),
+            color=s.get("color", "#888"),
+            neighbors=[n for n in neighbors] if isinstance(neighbors, (list, tuple)) else [],
+            urban_k=_num(s.get("urban"), 0.0, 0.0, 1e9), rural_k=_num(s.get("rural"), 0.0, 0.0, 1e9),
+            area=_num(s.get("area"), 0.0, 0.0, 1e9), pole=s.get("pole"),
+            provinces=[p for p in provinces_raw_states] if isinstance(provinces_raw_states, (list, tuple)) else [],
+            army=dict(army), alert=_num(s.get("alert"), 1.0, 0.0, 10.0), diplo_labels=diplo,
+            campaigns=[c for c in campaigns] if isinstance(campaigns, (list, tuple)) else [], regiments=len(military),
         )
 
     # ---------------- міста
     burgs = {}
+    if not isinstance(burgs_raw, (list, tuple)):
+        burgs_raw = []
     for b in burgs_raw:
         if not isinstance(b, dict) or "name" not in b or b.get("removed"):
             continue
+        bid = _optional_int(b.get("i"), 0, 1000000)
+        if bid is None:
+            continue
+        production = b.get("production")
+        if not isinstance(production, (list, tuple)):
+            production = []
         craft = collections.OrderedDict()
-        for p in b.get("production", []):
-            if "goodId" not in p or "recipe" not in p:
+        for p in production:
+            if not isinstance(p, dict) or "goodId" not in p or "recipe" not in p:
                 continue
-            rec = {r["goodId"]: r["units"] for r in p["recipe"]}
-            key = (p["goodId"], tuple(sorted(rec.items())))
-            craft[key] = craft.get(key, 0) + p["units"]
-        pop_val = float(b.get("population") or 0.5) * 1000.0
-        burgs[b["i"]] = dict(
-            id=b["i"], name=b["name"], state=b.get("state", 0), culture=b.get("culture", 0),
-            x=b["x"], y=b["y"], capital=bool(b.get("capital")), port=bool(b.get("port")),
-            pop=max(200.0, pop_val), kind=b.get("type", "Generic"), group=b.get("group", "towns"),
-            market=b.get("market"), walls=bool(b.get("walls")), temple=bool(b.get("temple")),
-            citadel=bool(b.get("citadel")), plaza=bool(b.get("plaza")), cell=b.get("cell", 0),
-            feature=b.get("feature"), treasury_map=b.get("treasury", 0),
+            gid = _optional_int(p.get("goodId"), 0, 1000000)
+            if gid is None:
+                continue
+            rec = {}
+            recipe_raw = p.get("recipe")
+            if isinstance(recipe_raw, (list, tuple)):
+                for r in recipe_raw:
+                    if not isinstance(r, dict):
+                        continue
+                    rig = _optional_int(r.get("goodId"), 0, 1000000)
+                    if rig is not None:
+                        rec[rig] = _num(r.get("units"), 0.0, 0.0, 1e9)
+            units = _num(p.get("units"), 0.0, 0.0, 1e9)
+            key = (gid, tuple(sorted(rec.items())))
+            craft[key] = craft.get(key, 0.0) + units
+        pop_val = _num(b.get("population"), 0.5, 0.0, 1e6) * 1000.0
+        burgs[bid] = dict(
+            id=bid, name=str(b["name"]), state=_integer(b.get("state"), 0, 0, 1000000),
+            culture=_integer(b.get("culture"), 0, 0, 1000000),
+            x=_num(b.get("x"), 0.0, -1e7, 1e7), y=_num(b.get("y"), 0.0, -1e7, 1e7),
+            capital=bool(b.get("capital")), port=bool(b.get("port")),
+            pop=max(200.0, pop_val), kind=str(b.get("type", "Generic")), group=str(b.get("group", "towns")),
+            market=_optional_int(b.get("market"), 0, 1000000),
+            walls=bool(b.get("walls")), temple=bool(b.get("temple")),
+            citadel=bool(b.get("citadel")), plaza=bool(b.get("plaza")),
+            cell=_integer(b.get("cell"), 0, 0, 10**9),
+            feature=b.get("feature"), treasury_map=_num(b.get("treasury"), 0.0, -1e12, 1e12),
             craft=[dict(good=k[0], recipe=dict(k[1]), units=u) for k, u in craft.items()],
             raw={}, rural=0.0,
         )
         raw_slots = collections.Counter()
-        for p in b.get("production", []):
-            if "goodId" in p and "recipe" not in p:
-                raw_slots[p["goodId"]] += p["units"]
-        burgs[b["i"]]["raw_slots"] = dict(raw_slots)
+        for p in production:
+            if isinstance(p, dict) and "goodId" in p and "recipe" not in p:
+                gid = _optional_int(p.get("goodId"), 0, 1000000)
+                if gid is not None:
+                    raw_slots[gid] += _num(p.get("units"), 0.0, 0.0, 1e9)
+        burgs[bid]["raw_slots"] = dict(raw_slots)
 
     # Нейтральні міста (state=0) або якщо в карті взагалі немає держав
     for b in burgs.values():
@@ -518,29 +717,75 @@ def import_map(path):
         )
 
     goods = {}
+    if not isinstance(goods_raw, (list, tuple)):
+        goods_raw = []
     for g in goods_raw:
-        cov = dict(g.get("demandCoverage") or {})
-        for cat, v in EXTRA_COVERAGE.get(g["i"], {}).items():
+        if not isinstance(g, dict):
+            continue
+        gid = _optional_int(g.get("i"), 0, 1000000)
+        if gid is None:
+            continue
+        cov_in = g.get("demandCoverage")
+        cov = {c: _num(cov_in.get(c), 0.0, 0.0, 100.0) for c in LD.CATEGORIES} \
+            if isinstance(cov_in, dict) else {c: 0.0 for c in LD.CATEGORIES}
+        for cat, v in EXTRA_COVERAGE.get(gid, {}).items():
             cov.setdefault(cat, v)
         recipes = []
-        for r in g.get("recipes") or []:
-            recipes.append({int(k): v for k, v in r.items()})
-        goods[g["i"]] = dict(
-            id=g["i"], name=g["name"], value=g["value"], tags=g.get("tags", []), unit=g.get("unit", ""),
-            cover=cov, recipes=recipes, chance=g.get("chance", 0),
-            biome_out={int(k): v for k, v in (g.get("biomeOutput") or {}).items()},
-            cult_mult=(g.get("multipliers") or {}).get("cultureType", {}),
+        recipes_in = g.get("recipes")
+        if isinstance(recipes_in, (list, tuple)):
+            for r in recipes_in:
+                if not isinstance(r, dict):
+                    continue
+                nrec = {}
+                for k, v in r.items():
+                    rig = _optional_int(k, 0, 1000000)
+                    q = _num(v, 0.0, 0.0, 1e9)
+                    if rig is not None and q > 0:
+                        nrec[rig] = q
+                if nrec:
+                    recipes.append(nrec)
+        biome_in = g.get("biomeOutput")
+        biome_out = {}
+        if isinstance(biome_in, dict):
+            for k, v in biome_in.items():
+                bk = _optional_int(k, 0, 10000)
+                if bk is not None:
+                    biome_out[bk] = _num(v, 0.0, 0.0, 1000.0)
+        mult_in = g.get("multipliers")
+        ct = mult_in.get("cultureType") if isinstance(mult_in, dict) else None
+        cult_mult = {str(k): _num(v, 1.0, 0.0, 100.0) for k, v in ct.items()} if isinstance(ct, dict) else {}
+        tags = g.get("tags")
+        goods[gid] = dict(
+            id=gid, name=str(g.get("name", f"Good #{gid}")), value=_num(g.get("value"), 1.0, 1e-9, 1e9),
+            tags=[str(t) for t in tags] if isinstance(tags, (list, tuple)) else [],
+            unit=str(g.get("unit", "")),
+            cover=cov, recipes=recipes, chance=_num(g.get("chance"), 0.0, 0.0, 1e6),
+            biome_out=biome_out, cult_mult=cult_mult,
         )
 
     markets = {}
+    if not isinstance(markets_raw, (list, tuple)):
+        markets_raw = []
     for m in markets_raw:
-        if m["centerBurgId"] not in burgs:
+        if not isinstance(m, dict):
             continue
-        markets[m["i"]] = dict(
-            id=m["i"], center=m["centerBurgId"],
-            stock={int(k): v["stock"] for k, v in m["goods"].items()},
-            price={int(k): v["price"] for k, v in m["goods"].items()},
-            burgs=[], edges=[],
+        mid = _optional_int(m.get("i"), 0, 1000000)
+        center = _optional_int(m.get("centerBurgId"), 0, 1000000)
+        if mid is None or center not in burgs:
+            continue
+        goods_in = m.get("goods")
+        if not isinstance(goods_in, dict):
+            goods_in = {}
+        stock, price = {}, {}
+        for k, entry in goods_in.items():
+            gid = _optional_int(k, 0, 1000000)
+            if gid is None or gid not in goods:
+                continue
+            entry = entry if isinstance(entry, dict) else {}
+            stock[gid] = _num(entry.get("stock"), 0.0, 0.0, 1e12)
+            price[gid] = _num(entry.get("price"), goods[gid]["value"], 1e-9, 1e12)
+        markets[mid] = dict(
+            id=mid, center=center, stock=stock, price=price, burgs=[], edges=[],
         )
 
     mk_center = {m["id"]: burgs[m["center"]] for m in markets.values()}
@@ -552,7 +797,8 @@ def import_map(path):
 
     # ---------------- сільське населення та сировина за клітинками
     habit = {bi["i"]: bi["habitability"] for bi in biomes}
-    culture_type = {c["i"]: c.get("type", "Generic") for c in cultures if isinstance(c, dict)}
+    culture_type = {c["i"]: c.get("type", "Generic") for c in cultures
+                    if isinstance(c, dict) and "i" in c}
     cells_by_state = collections.defaultdict(list)
     for c in range(len(c_state)):
         s = c_state[c]
@@ -601,29 +847,50 @@ def import_map(path):
                     t["raw"][gid] = t["raw"].get(gid, 0.0) + u * share
 
     # водні ресурси: риба/кити/перлини — у портах, на річках і озерах
-    lat_n, lat_s = float(geo.get("latN", 60.0)), float(geo.get("latS", -60.0))
+    lat_n = _num(geo.get("latN"), 60.0, -90.0, 90.0)
+    lat_s = _num(geo.get("latS"), -60.0, -90.0, 90.0)
+    fish_id = LD.GOOD_IDS.get("fish")
+    whales_id = LD.GOOD_IDS.get("whales")
+    pearls_id = LD.GOOD_IDS.get("pearls")
     for b in burgs.values():
         tot_k = (b["pop"] + b["rural"]) / 1000.0
         lat = lat_n - b["y"] / max(height, 1) * (lat_n - lat_s)
         if b["port"] or b["kind"] in ("Naval",):
-            b["raw"][11] = b["raw"].get(11, 0.0) + tot_k * 1.8 * (1.4 if b["kind"] == "Naval" else 1.0)
-            if abs(lat) > 35:
-                b["raw"][37] = b["raw"].get(37, 0.0) + tot_k * 0.5
-            if abs(lat) < 25 and (b["id"] * 2654435761) % 100 < 14:
-                b["raw"][22] = b["raw"].get(22, 0.0) + tot_k * 0.02
-        elif b["kind"] in ("River", "Lake"):
-            b["raw"][11] = b["raw"].get(11, 0.0) + tot_k * 0.8
+            if fish_id in goods:
+                b["raw"][fish_id] = b["raw"].get(fish_id, 0.0) + tot_k * 1.8 * (1.4 if b["kind"] == "Naval" else 1.0)
+            if abs(lat) > 35 and whales_id in goods:
+                b["raw"][whales_id] = b["raw"].get(whales_id, 0.0) + tot_k * 0.5
+            if abs(lat) < 25 and pearls_id in goods and (b["id"] * 2654435761) % 100 < 14:
+                b["raw"][pearls_id] = b["raw"].get(pearls_id, 0.0) + tot_k * 0.02
+        elif b["kind"] in ("River", "Lake") and fish_id in goods:
+            b["raw"][fish_id] = b["raw"].get(fish_id, 0.0) + tot_k * 0.8
+    # остаточне фільтрування: невідомий goodId не має потрапити у світ
+    for b in burgs.values():
+        b["raw"] = {g: u for g, u in b["raw"].items() if g in goods}
+        b["raw_slots"] = {g: u for g, u in b.get("raw_slots", {}).items() if g in goods}
+        filtered_craft = []
+        for sl in b.get("craft", []):
+            if not isinstance(sl, dict) or sl.get("good") not in goods:
+                continue
+            sl["recipe"] = {g: q for g, q in (sl.get("recipe") or {}).items() if g in goods}
+            filtered_craft.append(sl)
+        b["craft"] = filtered_craft
     for b in burgs.values():
         if b["rural"] <= 0:
             b["rural"] = b["pop"] * 2.0
 
     # ---------------- торгові лінки між ринками
     pair_units = collections.Counter()
+    if not isinstance(trade_raw, (list, tuple)):
+        trade_raw = []
     for t in trade_raw:
-        if t.get("sellerType") == "market" and t.get("buyerType") == "market":
-            a_m, b_m = t["seller"], t["buyer"]
-            if a_m in markets and b_m in markets and a_m != b_m:
-                pair_units[tuple(sorted((a_m, b_m)))] += t.get("units", 10)
+        if not isinstance(t, dict) or t.get("sellerType") != "market" or t.get("buyerType") != "market":
+            continue
+        a_m = _optional_int(t.get("seller"), 0, 1000000)
+        b_m = _optional_int(t.get("buyer"), 0, 1000000)
+        if a_m is None or b_m is None or a_m not in markets or b_m not in markets or a_m == b_m:
+            continue
+        pair_units[tuple(sorted((a_m, b_m)))] += _num(t.get("units"), 10.0, 0.0, 1e9)
     adj = collections.defaultdict(set)
     for a, b in pair_units:
         adj[a].add(b)
@@ -661,7 +928,7 @@ def import_map(path):
         pair_units[tuple(sorted((m1, m2)))] += 1
         cs = comps()
 
-    dist_scale = float(units.get("distance", {}).get("scale", 3.0) or 3.0)
+    dist_scale = _num(units.get("distance", {}).get("scale"), 3.0, 1e-6, 1000.0)
     edges = []
     for (a, b), u in pair_units.items():
         ca, cb = mk_center[a], mk_center[b]
@@ -674,16 +941,25 @@ def import_map(path):
 
     # ---------------- провінції, прив'язка міст, культури, релігії
     provinces = {}
-    for p in provinces_raw[1:] if len(provinces_raw) > 1 else provinces_raw:
+    source_provs = provinces_raw if isinstance(provinces_raw, (list, tuple)) else []
+    if len(source_provs) > 1:
+        source_provs = source_provs[1:]
+    for p in source_provs:
         if not isinstance(p, dict) or not p.get("name") or p.get("removed"):
             continue
-        psid = p.get("state", 0)
-        if psid not in states:
+        pid = _optional_int(p.get("i"), 0, 1000000)
+        psid = _optional_int(p.get("state"), 0, 1000000)
+        if pid is None or psid not in states:
             continue
-        provinces[p["i"]] = dict(
-            id=p["i"], name=p["name"], full_name=p.get("fullName", p["name"]),
-            state=psid, burg=p.get("burg"), form=p.get("formName", ""),
-            color=p.get("color", "#6a8caf"), pole=p.get("pole"), coa=p.get("coa"),
+        pole = p.get("pole")
+        if isinstance(pole, (list, tuple)) and len(pole) >= 2:
+            pole = [_num(pole[0], 0.0, -1e7, 1e7), _num(pole[1], 0.0, -1e7, 1e7)]
+        else:
+            pole = None
+        provinces[pid] = dict(
+            id=pid, name=str(p["name"]), full_name=str(p.get("fullName") or p["name"]),
+            state=psid, burg=_optional_int(p.get("burg"), 0, 1000000), form=str(p.get("formName", "")),
+            color=p.get("color", "#6a8caf"), pole=pole, coa=p.get("coa"),
             burgs=[],
         )
 
@@ -762,25 +1038,39 @@ def import_map(path):
     markers = []
     if burgs:
         bvals = list(burgs.values())
+        if not isinstance(markers_raw, (list, tuple)):
+            markers_raw = []
         for m in markers_raw:
             if not isinstance(m, dict) or "x" not in m or "y" not in m:
                 continue
-            near = min(bvals, key=lambda b: _dist((b["x"], b["y"]), (m["x"], m["y"])))
-            cell_i = m.get("cell", -1)
+            mx = _num(m["x"], 0.0, -1e7, 1e7)
+            my = _num(m["y"], 0.0, -1e7, 1e7)
+            near = min(bvals, key=lambda b: _dist((b["x"], b["y"]), (mx, my)))
+            cell_i = _integer(m.get("cell"), -1, -1, 10**9)
             sid = c_state[cell_i] if 0 <= cell_i < len(c_state) else 0
-            markers.append(dict(i=m.get("i"), type=m.get("type", ""), name=_clean(m.get("name", "")),
-                                note=_clean(m.get("note", "")), x=m["x"], y=m["y"],
+            markers.append(dict(i=_optional_int(m.get("i"), 0, 1000000), type=str(m.get("type", "")),
+                                name=_clean(str(m.get("name", ""))),
+                                note=_clean(str(m.get("note", ""))), x=mx, y=my,
                                 state=sid if sid in states else near["state"], burg=near["id"]))
 
     # ---------------- війни з карти
     wars_map = {}
     for sid, st in states.items():
         for c in st["campaigns"]:
-            key = (c.get("name", "War"), c.get("start", 0), c.get("attacker"), c.get("defender"))
-            wars_map[key] = dict(name=c.get("name", "War"), start=c.get("start", 0), end=c.get("end"),
-                                 attacker=c.get("attacker"), defender=c.get("defender"))
+            if not isinstance(c, dict):
+                continue
+            name = str(c.get("name", "War"))
+            start = _integer(c.get("start"), 0, -100000, 100000)
+            end = _optional_int(c.get("end"), -100000, 100000)
+            attacker = _optional_int(c.get("attacker"), 0, 1000000)
+            defender = _optional_int(c.get("defender"), 0, 1000000)
+            key = (name, start, attacker, defender)
+            wars_map[key] = dict(name=name, start=start, end=end, attacker=attacker, defender=defender)
     history_wars = sorted(wars_map.values(), key=lambda w: w["start"])
-    campaigns_zones = [dict(name=c.get("name", ""), type=c.get("type", "")) for c in campaigns_raw if isinstance(c, dict)]
+    if not isinstance(campaigns_raw, (list, tuple)):
+        campaigns_raw = []
+    campaigns_zones = [dict(name=str(c.get("name", "")), type=str(c.get("type", "")))
+                       for c in campaigns_raw if isinstance(c, dict)]
 
     # ---------------- ландмаси столиць
     for st in states.values():
@@ -788,7 +1078,7 @@ def import_map(path):
         st["landmass"] = feat.get(cb["feature"], {}).get("name") if cb else None
 
     pop_total = sum(b["pop"] + b["rural"] for b in burgs.values())
-    return dict(
+    return _sanitize_numbers(dict(
         meta=dict(
             map_version=head[0] if head else "unknown",
             map_date=head[2] if len(head) > 2 else "",
@@ -804,12 +1094,30 @@ def import_map(path):
         goods=goods, markets=markets, edges=edges, states=states, burgs=burgs, provinces=provinces,
         cultures=culture_out, religions=religions_out, markers=markers,
         history_wars=history_wars, war_zones=campaigns_zones,
-    )
+    ))
+
+
+def _write_json_safe(obj, path, *, compact=False):
+    """Атомарний JSON-запис: allow_nan=False і очищення tmp при будь-якій помилці."""
+    os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+    tmp = path + ".tmp"
+    kw = dict(ensure_ascii=False, allow_nan=False)
+    if compact:
+        kw["separators"] = (",", ":")
+    try:
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(obj, f, **kw)
+        os.replace(tmp, path)
+    except BaseException:
+        try:
+            os.remove(tmp)
+        except OSError:
+            pass
+        raise
 
 
 def save_import(world, path):
-    with open(path, "w", encoding="utf-8") as f:
-        json.dump(world, f, ensure_ascii=False)
+    _write_json_safe(world, path)
 
 
 # ---------------------------------------------------------------------------
@@ -1022,11 +1330,7 @@ def extract_map_geometry(text_or_path, world):
 
 
 def save_map_geo(geo, path):
-    os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
-    tmp = path + ".tmp"
-    with open(tmp, "w", encoding="utf-8") as f:
-        json.dump(geo, f, ensure_ascii=False, separators=(",", ":"))
-    os.replace(tmp, path)
+    _write_json_safe(geo, path, compact=True)
 
 
 def load_map_geo(path):

@@ -18,6 +18,41 @@ PMIN, PMAX = 0.30, 6.0          # межі ціни відносно базов�
 COVER_MONTHS = 1.5               # цільовий запас у місяцях попиту
 AGRI_TAGS = {"food", "clothing"}
 
+# Спільний контракт конфігурації. worldgen.py копіює ці значення у world["config"],
+# а Sim.cfg() використовує їх як фолбек для старих збережень.
+CONFIG_DEFAULTS = {
+    "price_elasticity": 0.18,
+    "carry_cap": 1.65,
+    "tech_cap": 3.0,
+    "tech_decay": 0.002,
+    "max_events_per_month": 4,
+    "event_scale_by_size": True,
+    "neighbor_drift": -0.03,
+    "army_recovery_rate": 0.03,
+    "trade_budget_factor": 2.0,
+    "guild_invest_rate": 0.02,
+    "demand_elasticity_enabled": True,
+    "dynamic_recipes": True,
+    "capital_constraint": True,
+    "mil_k": 1.0,
+    "mil_goods_per_head": 0.002,
+    "event_rate": 1.0,
+    "war_rate": 1.0,
+    # існуючі ключі (фолбек для старих/неповних збережень)
+    "per_capita": {"food": 10.0, "utilities": 4.0, "construction": 1.5, "luxury": 0.8},
+    "craft_scale": 1.0,
+    "transport_rate": 0.012,
+    "birth": 0.0042,
+    "death": 0.0028,
+    "poll_k": 1.0,
+    "admin_share": 0.2,
+}
+
+
+def seed_market_capital(pop):
+    """Початковий капітал ринку, похідний від населення його центру."""
+    return max(100.0, float(pop or 0.0) * 0.01)
+
 
 # ---------------------------------------------------------------------------
 # Збереження / завантаження
@@ -26,8 +61,17 @@ def _intkeys(o):
     if isinstance(o, dict):
         out = {}
         for k, v in o.items():
-            if isinstance(k, str) and (k.isdigit() or (k[:1] == "-" and k[1:].isdigit())):
-                k = int(k)
+            ik = None
+            if isinstance(k, str) and k:
+                try:
+                    ik = int(k)
+                except ValueError:
+                    ik = None
+                # лише канонічні десяткові рядки ("1", "-2"); "01"/"+1" лишаємо як є
+                if ik is not None and str(ik) != k:
+                    ik = None
+            if ik is not None and ik not in out:
+                k = ik
             out[k] = _intkeys(v)
         return out
     if isinstance(o, list):
@@ -45,11 +89,18 @@ def save_world(world, path):
     tmp = path + ".tmp"
     skip = {k: world.pop(k) for k in ("war_pairs", "_new_journal") if k in world}
     try:
-        with open(tmp, "w", encoding="utf-8") as f:
-            json.dump(world, f, ensure_ascii=False, separators=(",", ":"))
+        try:
+            with open(tmp, "w", encoding="utf-8") as f:
+                json.dump(world, f, ensure_ascii=False, separators=(",", ":"), allow_nan=False)
+            os.replace(tmp, path)
+        except BaseException:
+            try:
+                os.remove(tmp)
+            except OSError:
+                pass
+            raise
     finally:
         world.update(skip)
-    os.replace(tmp, path)
 
 
 # ---------------------------------------------------------------------------
@@ -57,6 +108,15 @@ def save_world(world, path):
 # ---------------------------------------------------------------------------
 def clamp(x, a, b):
     return a if x < a else b if x > b else x
+
+
+def _finite(value, default=0.0):
+    """Безпечне приведення до скінченного float (для недовірених даних)."""
+    try:
+        v = float(value)
+    except (TypeError, ValueError, OverflowError):
+        return default
+    return v if math.isfinite(v) else default
 
 
 def season(month, lat):
@@ -81,9 +141,14 @@ class Sim:
     def __init__(self, world, seed=None):
         self.w = world
         self.seed = seed if seed is not None else world["meta"].get("sim_seed", 1)
+        self.rng = random.Random(self.seed)
         self.rt = None
-        for m in world.get("mods", []):
-            if m["scope"] == "pair" and isinstance(m["id"], list):
+        mods = world.get("mods")
+        if not isinstance(mods, list):
+            mods = []
+            world["mods"] = mods
+        for m in mods:
+            if isinstance(m, dict) and m.get("scope") == "pair" and isinstance(m.get("id"), list):
                 m["id"] = tuple(m["id"])
         self.build_runtime()
         self._index_mods()
@@ -91,6 +156,10 @@ class Sim:
     # ------------------------------------------------------------------ runtime
     def build_runtime(self):
         w = self.w
+        cfg = w.setdefault("config", {})
+        for key, val in CONFIG_DEFAULTS.items():
+            if key not in cfg:
+                cfg[key] = dict(val) if isinstance(val, dict) else val
         self.goods = w["goods"]
         self.markets = w["markets"]
         self.burgs = w["burgs"]
@@ -98,8 +167,58 @@ class Sim:
         self.provinces = w.setdefault("provinces", {})
         self.edges = w["edges"]
         self._ensure_provinces()
+        # Нормалізація недовірених/старих даних: жоден товар чи значення не має
+        # вибити симуляцію (KeyError / NaN / inf).
+        goods = self.goods
+        for gid, gd in list(goods.items()):
+            if not isinstance(gd, dict):
+                del goods[gid]
+                continue
+            gd["value"] = max(1e-9, _finite(gd.get("value"), 1.0))
+            cov = gd.get("cover")
+            gd["cover"] = {c: max(0.0, _finite(cov.get(c), 0.0)) if isinstance(cov, dict) else 0.0
+                           for c in LD.CATEGORIES}
+            tags = gd.get("tags")
+            gd["tags"] = [t for t in tags if isinstance(t, str)] if isinstance(tags, (list, tuple)) else []
+            recipes = gd.get("recipes")
+            norm_recipes = []
+            if isinstance(recipes, (list, tuple)):
+                for rec in recipes:
+                    if not isinstance(rec, dict):
+                        continue
+                    nrec = {}
+                    for i, q in rec.items():
+                        if i in goods:
+                            qq = _finite(q, 0.0)
+                            if qq > 0:
+                                nrec[i] = qq
+                    if nrec:
+                        norm_recipes.append(nrec)
+            gd["recipes"] = norm_recipes
+        for b in self.burgs.values():
+            raw = b.get("raw")
+            b["raw"] = {g: max(0.0, _finite(u, 0.0)) for g, u in raw.items() if g in goods} \
+                if isinstance(raw, dict) else {}
+            craft = b.get("craft")
+            norm_craft = []
+            if isinstance(craft, (list, tuple)):
+                for sl in craft:
+                    if not isinstance(sl, dict) or sl.get("good") not in goods:
+                        continue
+                    rec = sl.get("recipe")
+                    sl["recipe"] = {i: max(0.0, _finite(q, 0.0)) for i, q in rec.items() if i in goods} \
+                        if isinstance(rec, dict) else {}
+                    sl["units"] = max(0.0, _finite(sl.get("units"), 0.0))
+                    norm_craft.append(sl)
+            b["craft"] = norm_craft
         meta = w["meta"]
-        self.lat = {bid: meta["lat_n"] - b["y"] / meta["height"] * (meta["lat_n"] - meta["lat_s"])
+        lat_n = _finite(meta.get("lat_n"), 60.0)
+        lat_s = _finite(meta.get("lat_s"), -60.0)
+        height = _finite(meta.get("height"), 800.0)
+        if height <= 0:
+            height = 800.0
+            meta["height"] = height
+        self.lat = {bid: lat_n - _finite(b.get("y"), 0.0) / height * (lat_n - lat_s)
                     for bid, b in self.burgs.items()}
         self.state_burgs = collections.defaultdict(list)
         for bid, b in self.burgs.items():
@@ -112,7 +231,7 @@ class Sim:
         def dep(g, stack=()):
             if g in depth:
                 return depth[g]
-            if g in stack:
+            if g in stack or len(stack) >= 64:
                 return 0
             rec = self.goods[g]["recipes"]
             if not rec:
@@ -124,9 +243,21 @@ class Sim:
         for g in self.goods:
             dep(g)
         self.depth = depth
+        non_agri = set()
+        for name in ("salt", "honey"):
+            gid = LD.GOOD_IDS.get(name)
+            if gid is not None:
+                non_agri.add(gid)
         self.agri_goods = {g for g, d in self.goods.items()
                            if (set(d["tags"]) & AGRI_TAGS) and "aquatic" not in d["tags"] and not d["recipes"]
-                           and g not in (16, 15)}
+                           and g not in non_agri}
+        for mid, m in self.markets.items():
+            cb = self.burgs.get(m.get("center"), {})
+            for key in ("stock", "price", "want", "want_now", "shop_reserved"):
+                d = m.get(key)
+                m[key] = {g: max(0.0, _finite(v, 0.0)) for g, v in d.items() if g in goods} \
+                    if isinstance(d, dict) else {}
+            m["capital"] = _finite(m.get("capital"), seed_market_capital(_finite(cb.get("pop"), 0.0)))
         self.market_state = {}
         self.refresh_ownership()
         self._mods_dirty = True
@@ -201,8 +332,14 @@ class Sim:
 
     # ------------------------------------------------------------------ модифікатори
     def add_mod(self, scope, sid, key, val, months, src="", kind="mult"):
-        until = self.tick_index() + max(1, int(months))
-        self.w["mods"].append(dict(scope=scope, id=sid, key=key, val=val, until=until, src=src, kind=kind))
+        value = _finite(val, 0.0)
+        try:
+            span = max(1, min(int(_finite(months, 1)), 120))
+        except (TypeError, ValueError, OverflowError):
+            span = 1
+        until = self.tick_index() + span
+        self.w["mods"].append(dict(scope=scope, id=sid, key=key, val=value, until=until,
+                                   src=str(src)[:200], kind="mult" if kind == "mult" else "add"))
         self._mods_dirty = True
 
     def tick_index(self):
@@ -212,16 +349,26 @@ class Sim:
 
     def _index_mods(self):
         t = self.tick_index()
-        keep = [m for m in self.w["mods"] if m["until"] > t]
-        if len(keep) != len(self.w["mods"]):
+        mods = self.w.get("mods")
+        if not isinstance(mods, list):
+            mods = []
+            self.w["mods"] = mods
+        keep = [m for m in mods if isinstance(m, dict) and _finite(m.get("until"), 0) > t]
+        if len(keep) != len(mods):
             self.w["mods"] = keep
         mult, add = collections.defaultdict(lambda: 1.0), collections.defaultdict(float)
         for m in keep:
-            k = (m["scope"], m["id"], m["key"])
-            if m["kind"] == "mult":
-                mult[k] *= m["val"]
+            sid = m.get("id")
+            if isinstance(sid, list):
+                sid = tuple(sid)
+            if not isinstance(sid, (int, str, tuple)):
+                continue
+            k = (m.get("scope"), sid, m.get("key"))
+            val = _finite(m.get("val"), 0.0)
+            if m.get("kind") == "mult":
+                mult[k] *= val
             else:
-                add[k] += m["val"]
+                add[k] += val
         self._mult, self._add = mult, add
         self._mods_dirty = False
 
@@ -237,9 +384,15 @@ class Sim:
         rec = dict(y=d["year"], m=d["month"], kind=kind, text=text)
         rec.update(kw)
         self.w["journal"].append(rec)
-        self.w.setdefault("_new_journal", []).append(rec)
+        nj = self.w.get("_new_journal")
+        if not isinstance(nj, list):
+            nj = []
+            self.w["_new_journal"] = nj
+        nj.append(rec)
         if len(self.w["journal"]) > 6000:
             del self.w["journal"][:1000]
+        if len(nj) > 6000:
+            del nj[:1000]
 
     def sname(self, sid):
         st = self.states.get(sid)
@@ -248,6 +401,60 @@ class Sim:
     def bname(self, bid):
         b = self.burgs.get(bid)
         return b.get("uk", b["name"]) if b else f"місто #{bid}"
+
+    # ------------------------------------------------------------------ контракт модулів
+    def cfg(self, key, default=None):
+        """Читає world.config з фолбеком до загального контракту (старі збереження)."""
+        cfg = self.w.get("config")
+        if not isinstance(cfg, dict):
+            cfg = CONFIG_DEFAULTS
+        if key in cfg:
+            return cfg[key]
+        return CONFIG_DEFAULTS.get(key, default)
+
+    def gid(self, name, default=None):
+        """Стабільна назва товару -> канонічний ID (див. LD.GOOD_IDS)."""
+        return LD.GOOD_IDS.get(name, default)
+
+    def state_mult(self, sid, key, default=1.0):
+        """Безпечний мультиплікатор держави (trade_mod/tariff_mod/war_power)."""
+        st = self.states.get(sid)
+        if not isinstance(st, dict):
+            return default
+        val = st.get(key, default)
+        if val is None:
+            return default
+        try:
+            return float(val)
+        except (TypeError, ValueError):
+            return default
+
+    def state_power(self, sid):
+        """Потужність держави для історії/відображення; відсутнє war_power = 1.0."""
+        st = self.states.get(sid, {})
+        val = st.get("power")
+        if val is not None:
+            try:
+                return float(val)
+            except (TypeError, ValueError):
+                return 0.0
+        try:
+            from . import politics as PO
+            return float(PO.state_power(self, sid))
+        except (ImportError, AttributeError, TypeError, ValueError):
+            return 0.0
+
+    def mil_demand_units(self, sid, war=None):
+        """Обсяг військового попиту держави з урахуванням mil_k (використовує й politics.py)."""
+        st = self.states.get(sid)
+        if not st:
+            return 0.0
+        heads = sum(st.get("army", {}).values()) + sum(m.get("size", 0.0) for m in st.get("mercs", []))
+        if war is None:
+            war = any(sid in wr.get("attackers", []) or sid in wr.get("defenders", [])
+                      for wr in self.w.get("wars", []))
+        mult = 1.0 + 0.6 * bool(war)
+        return heads * float(self.cfg("mil_goods_per_head", 0.002)) * float(self.cfg("mil_k", 1.0)) * mult
 
     # ------------------------------------------------------------------ основний цикл
     def run(self, months, progress=None):
@@ -337,8 +544,9 @@ class Sim:
                 for sl in b["craft"]:
                     slots.append((self.depth[sl["good"]], bid, sl))
             slots.sort(key=lambda t: t[0])
-            # 2) ремесло
+            # 2) ремесло: щомісяця обираємо найкращий наявний рецепт
             want = m.setdefault("want", {})
+            dynamic = bool(self.cfg("dynamic_recipes", True))
             for _, bid, sl in slots:
                 b = self.burgs[bid]
                 cap = sl["units"] * cs * (((b["pop"] + b["rural"]) / max(b["pop0"], 1.0)) ** 0.7) \
@@ -346,32 +554,66 @@ class Sim:
                 if cap <= 0:
                     continue
                 g = sl["good"]
-                cost = 0.0
-                frac = 1.0
-                for i, q in sl["recipe"].items():
-                    need = q * cap
-                    want[i] = want.get(i, 0.0) + need * 0.8
-                    cost += q * price.get(i, self.goods[i]["value"])
-                    frac = min(frac, stock.get(i, 0.0) / need if need > 0 else 1.0)
+                if g not in self.goods:
+                    continue
                 gp = price.get(g, self.goods[g]["value"])
-                if gp < cost * 0.85:
-                    frac = min(frac, 0.25)
+                recipes = self.goods[g].get("recipes") or []
+                chosen = None
+                if recipes and dynamic:
+                    for idx, rec in enumerate(recipes):
+                        if not rec:
+                            continue
+                        rcost = sum(q * price.get(i, self.goods[i]["value"])
+                                    for i, q in rec.items() if i in self.goods)
+                        rfrac = 1.0
+                        for i, q in rec.items():
+                            need = q * cap
+                            if need > 1e-9:
+                                rfrac = min(rfrac, max(0.0, stock.get(i, 0.0)) / need)
+                        # пріоритет: прибутковість і наявність сировини; idx — стабільний тайбрейк
+                        score = (gp - rcost + 0.01) * rfrac - idx * 1e-6
+                        if chosen is None or score > chosen[0]:
+                            chosen = (score, rec, rcost, rfrac)
+                if chosen is None:
+                    rec = sl.get("recipe") or (recipes[0] if recipes else {})
+                    if not rec:
+                        continue
+                    rcost = sum(q * price.get(i, self.goods[i]["value"])
+                                for i, q in rec.items() if i in self.goods)
+                    rfrac = 1.0
+                    for i, q in rec.items():
+                        need = q * cap
+                        if need > 1e-9:
+                            rfrac = min(rfrac, max(0.0, stock.get(i, 0.0)) / need)
+                    chosen = (0.0, rec, rcost, rfrac)
+                _, recipe, cost, frac = chosen
+                # збиткове ремесло не споживає сировину взагалі
+                if gp < cost:
+                    frac = 0.0
+                else:
+                    for i, q in recipe.items():
+                        want[i] = want.get(i, 0.0) + q * cap * 0.8
                 if frac <= 0.0:
                     continue
-                for i, q in sl["recipe"].items():
+                for i, q in recipe.items():
                     stock[i] = max(0.0, stock.get(i, 0.0) - q * cap * frac)
                 q_out = cap * frac
                 stock[g] = stock.get(g, 0.0) + q_out
                 b["_out"] += q_out * gp - cap * frac * cost
             for bid in bl:
                 b = self.burgs[bid]
-                self.acc["gdp"][b["state"]] += max(b.get("_out", 0.0), 0.0)
+                self.acc["gdp"][b["state"]] += b.get("_out", 0.0)
                 self.acc["pop"][b["state"]] += b["pop"] + b["rural"]
 
     # ------------------------------------------------------------------ торгівля
     def trade(self, rng):
         cfg = self.w["config"]
-        rate = cfg["transport_rate"]
+        rate = max(0.0, _finite(cfg.get("transport_rate"), 0.012))
+        capital_on = bool(self.cfg("capital_constraint", True))
+        budget_factor = float(self.cfg("trade_budget_factor", 2.0))
+        # тимчасові (несеріалізовані) лічильники поточного місяця
+        self.imported_this_tick = collections.defaultdict(set)
+        self.trade_spent = collections.defaultdict(float)
         for ei, e in enumerate(self.edges):
             ma, mb = self.markets[e["a"]], self.markets[e["b"]]
             sa, sb = self.market_state[e["a"]], self.market_state[e["b"]]
@@ -386,21 +628,28 @@ class Sim:
                     tariff = 0.3
                 else:
                     tariff = f
+            # runtime-модифікатори торгівлі від politics/events (відсутні = 1.0)
+            tmult *= self.state_mult(sa, "trade_mod", 1.0) * self.state_mult(sb, "trade_mod", 1.0)
             moved_edge = 0.0
             if tmult > 0.001:
                 seaf = 0.45 if e["sea"] else 1.0
                 for src, dst, ms, md, sd in ((e["a"], e["b"], ma, mb, sb), (e["b"], e["a"], mb, ma, sa)):
+                    eff_tariff = clamp(tariff * self.state_mult(sd, "tariff_mod", 1.0), 0.0, 0.6)
                     for g, ps in ms["price"].items():
+                        # імпортоване цього місяця не можна перепродати в тому ж місяці
+                        if g in self.imported_this_tick[src]:
+                            continue
                         pd = md["price"].get(g)
                         if pd is None:
                             continue
                         gd = self.goods[g]
                         bulk = 1.0
                         for tg in gd["tags"]:
-                            if tg in LD.BULKY_TAGS:
-                                bulk = max(bulk, LD.BULKY_TAGS[tg]) if LD.BULKY_TAGS[tg] > 1 else min(bulk, LD.BULKY_TAGS[tg])
-                        cost = math.sqrt(max(gd["value"], 0.5)) * rate * (e["dist"] / 100.0) * bulk * seaf
-                        margin = pd * (1 - tariff) - ps - cost
+                            bulk *= LD.BULKY_TAGS.get(tg, 1.0)
+                        bulk = clamp(bulk, 0.1, 3.0)
+                        dist = max(0.0, _finite(e.get("dist"), 0.0))
+                        cost = math.sqrt(max(gd["value"], 0.5)) * rate * (dist / 100.0) * bulk * seaf
+                        margin = pd * (1 - eff_tariff) - ps - cost
                         if margin <= 0:
                             continue
                         avail = ms["stock"].get(g, 0.0)
@@ -410,23 +659,30 @@ class Sim:
                         dem = md.get("want", {}).get(g, 0.0)
                         room = max(dem * 2.5 - md["stock"].get(g, 0.0), dem * 0.3)
                         qty = min(avail * 0.28, room if dem > 0 else avail * 0.05) * clamp(margin / max(ps, 0.01), 0.05, 1.0) * tmult
+                        if capital_on:
+                            budget = max(50.0, float(ms.get("capital", 0.0)) * budget_factor)
+                            qty = min(qty, (budget - self.trade_spent[src]) / max(ps, 0.01))
                         if qty <= 0.05:
                             continue
-                        loss = 0.01 + (0.02 if "food" in gd["tags"] else 0.0) * (e["dist"] / 300.0)
+                        # велика відстань не може з'їсти більше чверті вантажу
+                        loss = clamp(0.01 + (0.02 if "food" in gd["tags"] else 0.0) * (dist / 300.0), 0.0, 0.25)
                         ms["stock"][g] -= qty
                         md["stock"][g] = md["stock"].get(g, 0.0) + qty * (1 - loss)
                         val = qty * ps
-                        self.acc["tariff"][sd] += qty * pd * tariff * 0.6
+                        prof = qty * margin
+                        self.imported_this_tick[dst].add(g)
+                        self.trade_spent[src] += val
+                        self.acc["tariff"][sd] += qty * pd * eff_tariff * 0.6
                         self.acc["trade_val"][sd] += val
                         self.acc["export_val"][self.market_state[src]] += val
                         self.acc["import_val"][sd] += val
-                        prof = qty * margin
-                        ms["capital"] = ms.get("capital", 0.0) + prof * 0.5
-                        md["capital"] = md.get("capital", 0.0) + prof * 0.5
+                        src_cap = float(ms.get("capital", 0.0))
+                        ms["capital"] = max(0.0, src_cap - val + prof * 0.5) if capital_on else src_cap + prof * 0.5
+                        md["capital"] = float(md.get("capital", 0.0)) + prof * 0.5
                         moved_edge += val
                         key = (sa, sb) if src == e["a"] else (sb, sa)
                         self.acc["trade_edge"][key] += val
-            e["flow"] = round(0.7 * e.get("flow", 0.0) + 0.3 * moved_edge, 2)
+            e["flow"] = round(0.7 * _finite(e.get("flow"), 0.0) + 0.3 * moved_edge, 2)
 
     def trade_friction(self, a, b):
         """Мито між державами або None, якщо торгівля заборонена (війна/ембарго)."""
@@ -448,12 +704,26 @@ class Sim:
     def consume(self, month, rng):
         cfg = self.w["config"]
         dpc = cfg["per_capita"]
+        cats = ("food", "utilities", "construction", "luxury")
+        elast_on = bool(self.cfg("demand_elasticity_enabled", True))
+        elast_k = float(self.cfg("price_elasticity", 0.18))
         for mid, m in self.markets.items():
             stock, price = m["stock"], m["price"]
             want = m["want_now"] = m.get("want_now", {})
+            # м'яка еластичність попиту: дорожчий кошик -> менша душова норма
+            factors = {}
+            for c in cats:
+                wsum = wtot = 0.0
+                for g in self.cat_goods[c]:
+                    wgt = max(m.get("want", {}).get(g, 0.0) + stock.get(g, 0.0) * 0.05, 0.5)
+                    ratio = price.get(g, self.goods[g]["value"]) / max(self.goods[g]["value"], 1.0)
+                    wsum += ratio * wgt
+                    wtot += wgt
+                idx = max(wsum / wtot, 1e-6) if wtot else 1.0
+                factors[c] = clamp(idx ** -elast_k, 0.55, 1.45) if elast_on else 1.0
             # відсортовані пропозиції по категоріях
             lists = {}
-            for c in ("food", "utilities", "construction", "luxury"):
+            for c in cats:
                 lst = []
                 for g in self.cat_goods[c]:
                     cv = self.goods[g]["cover"][c]
@@ -471,11 +741,13 @@ class Sim:
                 urb = b["pop"] / max(tot, 1.0)
                 agri, cold = season(month, self.lat[bid])
                 dem = {
-                    "food": k * dpc["food"] * self.mm("burg", bid, "food_need"),
-                    "utilities": k * dpc["utilities"] * (1 + 0.9 * cold) * self.mm("state", sid, "util_need"),
-                    "construction": k * dpc["construction"] * (0.6 + 2.0 * urb) * self.mm("burg", bid, "rebuild")
+                    "food": k * dpc["food"] * factors["food"] * self.mm("burg", bid, "food_need"),
+                    "utilities": k * dpc["utilities"] * factors["utilities"] * (1 + 0.9 * cold)
+                    * self.mm("state", sid, "util_need"),
+                    "construction": k * dpc["construction"] * factors["construction"]
+                    * (0.6 + LD.URBAN_CONSTR_BOOST * urb) * self.mm("burg", bid, "rebuild")
                     * self.mm("state", sid, "rebuild"),
-                    "luxury": k * dpc["luxury"] * (0.4 + LD.URBAN_LUXURY_BOOST * urb)
+                    "luxury": k * dpc["luxury"] * factors["luxury"] * (0.4 + LD.URBAN_LUXURY_BOOST * urb)
                     * (0.6 + 0.4 * st["stability"] / 100.0),
                 }
                 bs = b.setdefault("sat", {})
@@ -510,6 +782,23 @@ class Sim:
                     bs[c] = 0.5 * bs.get(c, 1.0) + 0.5 * sat
                     self.acc["req"][sid][c] += need
                     self.acc["got"][sid][c] += got
+            # планова військова потреба (mil_k, через mil_demand_units) — лише ціновий сигнал;
+            # фактичне списання військових товарів робить politics.step_finance()
+            mil_goods = self.cat_goods.get("military", [])
+            if mil_goods:
+                for sid, st in self.states.items():
+                    cb = self.burgs.get(st.get("capital"))
+                    if not cb or cb.get("market") != mid:
+                        continue
+                    units = self.mil_demand_units(sid)
+                    if units <= 0:
+                        continue
+                    cheapest = sorted(mil_goods, key=lambda g: price.get(g, self.goods[g]["value"])
+                                      / max(self.goods[g]["cover"].get("military", 1.0), 1e-6))[:3]
+                    share = units * 0.35 / len(cheapest)
+                    for g in cheapest:
+                        cv = max(self.goods[g]["cover"].get("military", 1.0), 1e-6)
+                        want[g] = want.get(g, 0.0) + share / cv
         # переносимо want_now → want (EMA)
         for m in self.markets.values():
             wn = m.pop("want_now", {})
@@ -525,10 +814,18 @@ class Sim:
                 s = stock.get(g, 0.0)
                 spoil = 0.04 if "food" in d["tags"] and "preservative" not in d["tags"] else 0.004
                 s *= (1 - spoil)
-                stock[g] = s
                 wnt = want.get(g, 0.0)
                 base = d["value"]
                 target = wnt * COVER_MONTHS
+                # Storage overflow: a stockpile many months beyond local demand
+                # wastes away (spoilage, theft, upkeep). Without this, raw goods
+                # with a large fixed output (e.g. hemp) grow without bound and
+                # crowd every other good out of the market. The ceiling scales
+                # with real demand, so staples with genuine consumption are safe.
+                ceiling = max(target * 8.0, 50.0)
+                if s > ceiling:
+                    s = ceiling + (s - ceiling) * 0.6
+                stock[g] = s
                 if target < 0.05:
                     ratio = 0.6 if s > 1 else 1.0
                     ratio = ratio ** 1
@@ -541,6 +838,7 @@ class Sim:
     # ------------------------------------------------------------------ населення
     def update_population(self, month, rng):
         cfg = self.w["config"]
+        carry = max(1.01, float(self.cfg("carry_cap", 1.65)))
         for bid, b in self.burgs.items():
             sid = b["state"]
             st = self.states[sid]
@@ -553,9 +851,12 @@ class Sim:
             if ratio <= 1.0:
                 # Компенсаційне відновлення після епідемій та воєн за наявності їжі
                 growth_factor = 1.0 + clamp(1.0 - ratio, 0.0, 0.75) * 0.85 * max(0.0, fs - 0.5)
+                # мінімальний підйом для зруйнованих міст (не діє при ratio >= 1, тобто не веде до перевищення капу)
+                recovery = 1.0 + 0.02 * clamp(1.0 - ratio, 0.0, 1.0) * clamp((fs - 0.4) / 0.6, 0.0, 1.0)
+                growth_factor = max(growth_factor, recovery)
             else:
-                # Плавне сповільнення приросту при наближенні до місткості середовища (1.65x pop0)
-                growth_factor = clamp(1.0 - (ratio - 1.0) / 0.65, 0.25, 1.0)
+                # Плавне сповільнення приросту; на carry_cap*pop0 приріст стає рівним нулю
+                growth_factor = clamp(1.0 - (ratio - 1.0) / max(carry - 1.0, 0.01), 0.0, 1.0)
             birth = cfg["birth"] * (0.5 + 0.5 * fs) * growth_factor \
                 * self.mm("state", sid, "pop_growth") * self.mm("burg", bid, "pop_growth")
             mort_add = min(0.015, self.ma("burg", bid, "mort") + self.ma("state", sid, "mort") + self.ma("market", b["market"], "mort"))
@@ -585,15 +886,16 @@ class Sim:
             st["food_sat"] = round(0.5 * st.get("food_sat", 1.0) + 0.5 * fs, 4)
             ls = got.get("luxury", 0) / req["luxury"] if req.get("luxury") else 1.0
             st["lux_sat"] = round(0.5 * st.get("lux_sat", 1.0) + 0.5 * ls, 4)
-            st["gdp"] = round(self.acc["gdp"].get(sid, 0.0), 2)
+            # сирий ВВП може бути від'ємним (збиткове ремесло); для історії/відображення показуємо 0
+            st["gdp"] = round(max(0.0, self.acc["gdp"].get(sid, 0.0)), 2)
             st["pop"] = round(self.acc["pop"].get(sid, 0.0))
             row[sid] = [st["gdp"], st["pop"], round(st["treasury"], 1), round(st["stability"], 1),
-                        st["food_sat"], round(st.get("power", 0.0), 1)]
+                        st["food_sat"], round(self.state_power(sid), 1)]
         h["states"].append([t, row])
         if len(h["states"]) > 240:
             del h["states"][:len(h["states"]) - 240]
         tot_pop = sum(self.acc["pop"].values())
-        tot_gdp = sum(self.acc["gdp"].values())
+        tot_gdp = max(0.0, sum(self.acc["gdp"].values()))
         fi = self.price_index("food")
         ui = self.price_index("utilities")
         ci = self.price_index("construction")

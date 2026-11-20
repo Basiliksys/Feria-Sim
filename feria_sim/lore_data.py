@@ -5,6 +5,7 @@
 валюти, усі держави з Obsidian-сховища, гільдії, найманці, ордени, башти магів,
 тип правителів, таблиці подій та сценарій Четвертого Походу на Кірос.
 """
+import math
 
 # ----------------------------------------------------------------------------
 # Календар
@@ -45,7 +46,13 @@ COIN_NAMES = [("пм", 1_000_000), ("зм", 10_000), ("см", 100), ("мм", 1)]
 
 def fmt_coins(value_units: float) -> str:
     """Переводить одиниці вартості у монети сховища (пм/зм/см/мм)."""
-    mm = int(round(value_units * VALUE_TO_MM))
+    try:
+        val = float(value_units)
+    except (TypeError, ValueError, OverflowError):
+        val = 0.0
+    if not math.isfinite(val) or val <= 0:
+        return "0 мм"
+    mm = int(round(val * VALUE_TO_MM))
     if mm <= 0:
         return "0 мм"
     parts = []
@@ -78,6 +85,25 @@ GOODS_UK = {
 
 BULKY_TAGS = {"construction": 0.9, "fuel": 1.0, "food": 1.0, "ore": 1.1,
               "luxury": 0.25, "currency": 0.1}
+
+# Стабільні імена товарів -> канонічні ID з goods_default.json (71 товар, IDs 1..71).
+# Використовуйте LD.GOOD_IDS замість «магічних» чисел в імпортері та інших модулях.
+GOOD_IDS = {
+    "wood": 1, "stone": 2, "marble": 3, "iron": 4, "copper": 5, "tin": 6,
+    "silver": 7, "gold": 8, "grain": 9, "cattle": 10, "fish": 11, "game": 12,
+    "wine": 13, "olives": 14, "honey": 15, "salt": 16, "dates": 17, "horses": 18,
+    "elephants": 19, "camels": 20, "hemp": 21, "pearls": 22, "gemstones": 23,
+    "dyes": 24, "incense": 25, "silk": 26, "spices": 27, "amber": 28, "furs": 29,
+    "sheep": 30, "slaves": 31, "tar": 32, "saltpeter": 33, "coal": 34, "oil": 35,
+    "mahogany": 36, "whales": 37, "sugarcane": 38, "tea": 39, "tobacco": 40,
+    "clay": 41, "white_sand": 42, "leather": 43, "cloth": 44, "garments": 45,
+    "ceramics": 46, "pottery": 46, "glass": 47, "rope": 48, "ropes": 48,
+    "paper": 49, "ink": 50, "books": 51, "sails": 52, "ships": 53, "boots": 54,
+    "harnesses": 55, "barrels": 56, "bronze": 57, "tools": 58, "arms": 59,
+    "gunpowder": 60, "artillery": 61, "coins": 62, "jewelry": 63,
+    "preserved_food": 64, "vinegar": 65, "cheese": 66, "beer": 67, "liquor": 68,
+    "candles": 69, "soap": 70, "perfume": 71,
+}
 
 
 def good_uk(gid, goods_dict=None):
@@ -474,7 +500,7 @@ _TRANSLIT = [
 
 
 def translit(name: str) -> str:
-    s = name.lower()
+    s = (name if isinstance(name, str) else str(name)).lower() if name is not None else ""
     out, i = [], 0
     while i < len(s):
         for lat, uk in _TRANSLIT:
@@ -490,10 +516,10 @@ def translit(name: str) -> str:
 
 
 GOV_PARAMS = {
-    "Monarchy": dict(stab_base=62, war_tolerance=1.0, tax_norm=1.0),
-    "Republic": dict(stab_base=58, war_tolerance=0.8, tax_norm=0.9),
-    "Theocracy": dict(stab_base=66, war_tolerance=1.1, tax_norm=1.05),
-    "Union": dict(stab_base=55, war_tolerance=0.7, tax_norm=0.9),
+    "Monarchy": dict(stab_base=62, war_tolerance=0.8, tax_norm=1.0),
+    "Republic": dict(stab_base=58, war_tolerance=1.0, tax_norm=0.95),
+    "Theocracy": dict(stab_base=66, war_tolerance=0.7, tax_norm=1.05),
+    "Union": dict(stab_base=55, war_tolerance=0.9, tax_norm=1.0),
 }
 
 DIPLO_SCORE = {
@@ -718,6 +744,51 @@ EVENT_TITLES = {
     "dragon_attack": "Напад дракона", "mana_surge": "Сплеск мани",
     "artifact_found": "Знахідка артефакта", "undead_incursion": "Вторгнення нежиті",
     "tower_breakthrough": "Прорив магічної башти", "black_rust": "Спалах «Чорної Іржі»",
+}
+
+# EVENT_CHOICES: ключ події -> список двох варіантів дії.
+# Схема effects навмисно проста (лише JSON-числа):
+#   stability, legitimacy, treasury, food_sat, lux_sat — адитивні дельти;
+#   prod_agri, prod_all, rebuild, trade — мультиплікатори (1.0 = без змін);
+#   mort — адитивний множник смертності.
+# Обробку вибору виконує events.py; тут лише дані.
+EVENT_CHOICES = {
+    "drought": [
+        dict(id="relief", label="Відкрити зерносховища",
+             effects={"stability": 2.0, "treasury": -40.0, "food_sat": 0.05}),
+        dict(id="irrigation", label="Мобілізувати селян на іригацію",
+             effects={"prod_agri": 1.08, "stability": -3.0, "mort": 0.0004}),
+    ],
+    "flood": [
+        dict(id="rebuild", label="Відбудувати мости за державний кошт",
+             effects={"treasury": -60.0, "rebuild": 1.35, "stability": 1.5}),
+        dict(id="levy", label="Притягнути громаду до робіт",
+             effects={"rebuild": 1.2, "stability": -2.0, "legitimacy": -1.0}),
+    ],
+    "gold_rush": [
+        dict(id="charter", label="Надати гільдії концесію",
+             effects={"treasury": 55.0, "prod_all": 1.05, "legitimacy": -1.0}),
+        dict(id="crown", label="Забрати копальні в казну",
+             effects={"treasury": 90.0, "stability": -4.0, "prod_all": 0.97}),
+    ],
+    "trade_boom": [
+        dict(id="lower_tariff", label="Знизити мита",
+             effects={"trade": 1.15, "treasury": -25.0, "stability": 1.0}),
+        dict(id="toll", label="Збільшити портові збори",
+             effects={"treasury": 45.0, "trade": 0.94, "legitimacy": -1.5}),
+    ],
+    "peasant_revolt": [
+        dict(id="amnesty", label="Оголосити амністію",
+             effects={"stability": 6.0, "legitimacy": 2.0, "treasury": -30.0}),
+        dict(id="suppress", label="Придушити силою",
+             effects={"stability": -5.0, "treasury": -15.0, "mort": 0.001}),
+    ],
+    "tech_advance": [
+        dict(id="patronize", label="Фінансувати майстерню",
+             effects={"treasury": -50.0, "prod_all": 1.06, "stability": 1.0}),
+        dict(id="conscript", label="Залучити вчених на службу",
+             effects={"prod_all": 1.04, "legitimacy": 1.5, "trade": 0.98}),
+    ],
 }
 
 # ----------------------------------------------------------------------------

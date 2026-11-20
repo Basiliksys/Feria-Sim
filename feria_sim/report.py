@@ -2,8 +2,9 @@
 """Текстові звіти та генерація нотаток Obsidian."""
 import os
 import re
-import shutil
 import collections
+import math
+import tempfile
 
 from . import lore_data as LD
 from . import engine as E
@@ -12,6 +13,10 @@ from . import dnd_tools as DT
 
 DEFAULT_VAULT = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
                              "DnD1", "D&D1", "Симуляція")
+
+# Обмеження для Journal-імпорту: звіт не має читати нескінченний файл.
+MAX_JOURNAL_LINES = 50_000
+_UNSAFE_NAME_RE = re.compile(r'[\\/:*?"<>|#^\[\]]')
 
 
 def fmt_n(x):
@@ -24,7 +29,83 @@ def fmt_n(x):
 
 
 def safe(name):
-    return re.sub(r'[\\/:*?"<>|#^\[\]]', "", name).strip()
+    """Ім'я файлу зі світових даних: без шляхів, '.'/'..' та порожніх значень."""
+    s = _UNSAFE_NAME_RE.sub("", str(name if name is not None else "")).strip()
+    if not s or s in (".", "..") or not s.strip(". "):
+        return ""
+    return s
+
+
+def file_name(name, fallback="Без назви"):
+    return (safe(name) or fallback) + ".md"
+
+
+def _num(value, default=0.0):
+    try:
+        f = float(value)
+        return f if math.isfinite(f) else default
+    except (TypeError, ValueError, OverflowError):
+        return default
+
+
+def md_escape(value):
+    """Спільне екранування рядків світу для Markdown і YAML."""
+    s = "" if value is None else str(value)
+    s = s.replace("\\", "\\\\")
+    for ch in ("|", "[", "]", "<", ">", "`", "*", "_"):
+        s = s.replace(ch, "\\" + ch)
+    return (s.replace("\r\n", " ").replace("\n", " ").replace("\r", " ")).strip()
+
+
+def yaml_scalar(value):
+    return '"' + md_escape(value).replace('"', '\\"') + '"'
+
+
+def _bounded_int(value, lo, hi):
+    try:
+        if isinstance(value, bool):
+            return None
+        v = int(value)
+    except (TypeError, ValueError, OverflowError):
+        return None
+    return v if lo <= v <= hi else None
+
+
+def month_name(m):
+    months = getattr(LD, "MONTHS_UK", []) or []
+    try:
+        mi = int(m)
+    except (TypeError, ValueError, OverflowError):
+        return str(m if m is not None else "—")
+    if 1 <= mi <= len(months):
+        return str(months[mi - 1])
+    return str(mi)
+
+
+def _within(root, path):
+    root = os.path.realpath(root)
+    try:
+        return os.path.commonpath([root, os.path.realpath(path)]) == root
+    except (ValueError, OSError):
+        return False
+
+
+def _vault_target(vault, path, used=None):
+    root = os.path.abspath(vault)
+    target = os.path.abspath(path)
+    if not _within(root, target):
+        raise ValueError(f"Шлях {path!r} виходить за межі сховища {vault!r}")
+    if used is not None:
+        key = os.path.normcase(target)
+        if key in used:
+            base, ext = os.path.splitext(target)
+            i = 2
+            while os.path.normcase(f"{base}-{i}{ext}") in used:
+                i += 1
+            target = f"{base}-{i}{ext}"
+            print(f"Попередження: дублікат назви {path!r} → {os.path.basename(target)}")
+        used.add(os.path.normcase(target))
+    return target
 
 
 def sstate(sim, sid):
@@ -61,10 +142,15 @@ def status_text(sim):
 
 
 def wars_line(sim, wr):
-    a = ", ".join(sim.sname(x) for x in wr["attackers"])
-    d = ", ".join(sim.sname(x) for x in wr["defenders"])
-    since = f"{LD.MONTHS_UK[wr['start_month']-1][:3]} {wr['start_year']}"
-    return f"{wr['name']}: [{a}] ↔ [{d}] з {since}, рахунок {wr['score']:+.0f} (+ на користь агресора), захоплено міст: {len(wr['captured'])}"
+    a = ", ".join(md_escape(sim.sname(x)) for x in (wr.get("attackers") or []))
+    d = ", ".join(md_escape(sim.sname(x)) for x in (wr.get("defenders") or []))
+    try:
+        score = float(wr.get("score", 0.0))
+    except (TypeError, ValueError):
+        score = 0.0
+    since = f"{month_name(wr.get('start_month'))[:3]} {wr.get('start_year', '—')}"
+    return (f"{md_escape(wr.get('name', '—'))}: [{a}] ↔ [{d}] з {since}, рахунок {score:+.0f} "
+            f"(+ на користь агресора), захоплено міст: {len(wr.get('captured') or [])}")
 
 
 def wars_text(sim):
@@ -114,7 +200,7 @@ def city_text(sim, bid):
              "Ціни ринку (відхилення від бази):"]
     rows = []
     for g, p in m["price"].items():
-        base = sim.goods[g]["value"]
+        base = max(float(sim.goods[g]["value"]), 1e-9)
         rows.append((p / base, g, p))
     rows.sort()
     for r, g, p in rows[:6] + rows[-6:]:
@@ -154,10 +240,18 @@ def province_text(sim, pid):
 HDR = "---\ntags: [симуляція, авто]\nоновлено: \"{d}\"\n---\n> [!warning] Файл генерується автоматично (`python -m feria_sim report`). Ручні правки буде перезаписано.\n\n"
 
 
-def _w(path, text):
-    os.makedirs(os.path.dirname(path), exist_ok=True)
-    with open(path, "w", encoding="utf-8", newline="\n") as f:
-        f.write(text)
+def _w(path, text, vault=None, used=None):
+    """Атомарний запис із перевіркою, що файл лишається всередині vault."""
+    target = _vault_target(vault, path, used) if vault is not None else os.path.abspath(path)
+    os.makedirs(os.path.dirname(target), exist_ok=True)
+    fd, tmp = tempfile.mkstemp(prefix=".tmp-", suffix=".md", dir=os.path.dirname(target))
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as f:
+            f.write(text)
+        os.replace(tmp, target)
+    finally:
+        if os.path.exists(tmp):
+            os.remove(tmp)
 
 
 def write_all(sim, vault=None):
@@ -168,253 +262,473 @@ def write_all(sim, vault=None):
             vault = os.path.join(DEFAULT_VAULT, safe(sim.w.get("meta", {}).get("world_name", "Світ")))
     d = E.date_str(sim.w)
     hdr = HDR.format(d=d)
+    used = set()
     n = 0
-    n += write_dashboard(sim, vault, hdr)
-    n += write_states(sim, vault, hdr)
-    n += write_markets(sim, vault, hdr)
-    n += write_goods(sim, vault, hdr)
-    n += write_journal(sim, vault, hdr)
-    n += write_misc(sim, vault, hdr)
-    n += write_session_prep(sim, vault, hdr)
+    n += write_dashboard(sim, vault, hdr, used=used)
+    n += write_states(sim, vault, hdr, used=used)
+    n += write_markets(sim, vault, hdr, used=used)
+    n += write_goods(sim, vault, hdr, used=used)
+    n += write_journal(sim, vault, hdr, used=used)
+    n += write_misc(sim, vault, hdr, used=used)
+    n += write_session_prep(sim, vault, hdr, used=used)
     print(f"Нотатки Obsidian оновлено: {n} файлів → {vault}")
 
 
-def write_dashboard(sim, vault, hdr):
+def write_dashboard(sim, vault, hdr, used=None):
     w = sim.w
     tot_pop = sum(st.get("pop", 0) for st in sim.states.values())
     tot_gdp = sum(st.get("gdp", 0) for st in sim.states.values())
-    L = [hdr, f"# Дашборд симуляції Ферії\n\n**Дата:** {E.date_str(w)}  \n**Населення світу:** {fmt_n(tot_pop)}  \n"
-         f"**ВВП за місяць:** {fmt_n(tot_gdp)} од. (1 од. = {LD.fmt_coins(1)})  \n**Індекс цін на їжу:** {sim.price_index('food'):.2f} (1.00 = база)  \n"
-         f"**Активних війн:** {len(w['wars'])}  \n\nНавігація: [[Наступна сесія]] · [[Війни]] · [[Товари]] · [[Гільдії та найманці]] · [[Похід на Кірос]] · [[Правила симуляції]] · [[Ціна]] · [[Світ]]\n"]
+    L = [hdr, f"# Дашборд симуляції Ферії\n\n**Дата:** {md_escape(E.date_str(w))}  \n**Населення світу:** {fmt_n(tot_pop)}  \n"
+         f"**ВВП за місяць:** {fmt_n(tot_gdp)} од. (1 од. = {md_escape(LD.fmt_coins(1))})  \n**Індекс цін на їжу:** {sim.price_index('food'):.2f} (1.00 = база)  \n"
+         f"**Активних війн:** {len(w.get('wars') or [])}  \n\nНавігація: [[Наступна сесія]] · [[Війни]] · [[Товари]] · [[Квести]] · [[Маршрути та небезпека]] · [[Персонажі та фракції]] · [[Гільдії та найманці]] · [[Похід на Кірос]] · [[Правила симуляції]]\n"]
     L.append("\n## Держави (за ВВП)\n\n| Держава | Континент | Населення | ВВП/міс | Казна | Стабільність | Армія (сила) | Годування |\n|---|---|---:|---:|---:|---:|---:|---:|")
-    for sid, st in sorted(sim.states.items(), key=lambda kv: -kv[1].get("gdp", 0)):
+    for sid, st in sorted(sim.states.items(), key=lambda kv: -_num(kv[1].get("gdp"), 0.0)):
         s = state_summary(sim, sid)
-        L.append(f"| [[Держави/{safe(st['uk'])}\\|{st['uk']}]] | {st['continent']} | {fmt_n(s['pop'])} | {fmt_n(s['gdp'])} | {fmt_n(s['treasury'])} | {s['stab']:.0f} | {fmt_n(s['power'])} | {st['food_sat']*100:.0f}% |")
+        uk = md_escape(st.get("uk", "—"))
+        slink = safe(st.get("uk")) or "Без назви"
+        L.append(f"| [[Держави/{slink}\\|{uk}]] | {md_escape(st.get('continent'))} | {fmt_n(s['pop'])} | "
+                 f"{fmt_n(s['gdp'])} | {fmt_n(s['treasury'])} | {s['stab']:.0f} | {fmt_n(s['power'])} | "
+                 f"{_num(st.get('food_sat'))*100:.0f}% |")
     L.append("\n## Війни\n")
-    L.append("\n".join("- " + wars_line(sim, wr) for wr in w["wars"]) or "Мир.")
+    L.append("\n".join("- " + wars_line(sim, wr) for wr in (w.get("wars") or []) if isinstance(wr, dict)) or "Мир.")
     L.append("\n## Активні події\n")
-    ev = sorted(w.get("active_events", []), key=lambda e: -e["sev"])[:25]
-    y0 = w.get("meta", {}).get("start_year", LD.START_YEAR)
-    L.append("\n".join(f"- **{e['title']}** ({e['target']}, ступінь {e['sev']}, до {(e['until'] - 0) // 12 + y0} р.): {e['text']}" for e in ev) or "—")
+    ev = sorted((e for e in (w.get("active_events") or []) if isinstance(e, dict)),
+                key=lambda e: -_num(e.get("sev"), 1.0))[:25]
+    y0 = _num((w.get("meta") or {}).get("start_year", LD.START_YEAR), LD.START_YEAR)
+    lines = []
+    for e in ev:
+        until = _num(e.get("until"), 0.0)
+        lines.append(f"- **{md_escape(e.get('title'))}** ({md_escape(e.get('target'))}, ступінь {_num(e.get('sev'), 1.0):.0f}, "
+                     f"до {int(until) // 12 + int(y0)} р.): {md_escape(e.get('text'))}")
+    L.append("\n".join(lines) or "—")
     L.append("\n## Останні важливі події\n")
-    for r in [r for r in w["journal"] if r.get("sev", 1) >= 2][-30:][::-1]:
-        L.append(f"- *{LD.MONTHS_UK[r['m']-1]} {r['y']}* — {r['text']}")
-    _w(os.path.join(vault, "Дашборд.md"), "\n".join(L) + "\n")
+    for r in [r for r in (w.get("journal") or []) if isinstance(r, dict) and _num(r.get("sev"), 1.0) >= 2][-30:][::-1]:
+        L.append(f"- *{month_name(r.get('m'))} {md_escape(r.get('y'))}* — {md_escape(r.get('text'))}")
+    _w(os.path.join(vault, "Дашборд.md"), "\n".join(L) + "\n", vault=vault, used=used)
     return 1
 
 
-def write_states(sim, vault, hdr):
+def write_states(sim, vault, hdr, used=None):
     n = 0
     states_dir = os.path.join(vault, "Держави")
-    archive_dir = os.path.join(states_dir, "Архів")
-    active_files = set()
     for sid, st in sim.states.items():
         burgs_list = sim.state_burgs.get(sid, [])
-        fname = safe(st["uk"]) + ".md"
         if not burgs_list:
             continue
-        active_files.add(fname)
+        fname = file_name(st.get("uk"))
         s = state_summary(sim, sid)
-        r = st["ruler"]
-        fm = (f"---\ntags: [симуляція, авто, держава]\nоновлено: \"{E.date_str(sim.w)}\"\nконтинент: {st['continent']}\n"
-              f"населення: {int(s['pop'])}\nввп_міс: {s['gdp']:.1f}\nказна: {s['treasury']:.1f}\nстабільність: {s['stab']:.1f}\n"
-              f"сила_армії: {s['power']:.1f}\nвійни: {len(PO.in_war(sim, sid))}\n---\n")
-        L = [fm, "> [!warning] Файл генерується автоматично.\n", f"# {st['uk']}\n",
-             f"*{st['full_name']}* · {st['continent']} · [[Світ]]\n", st["lore"] + "\n" if st["lore"] else ""]
-        L.append(f"- **Правитель:** {r['name']}" + (f" ({r['age']} р.)" if r["age"] else "") +
-                 f" — {', '.join(LD.RULER_TRAITS[t]['label'] for t in r['traits'])}")
-        L.append(f"- **Форма правління:** {st['gov_text']}\n- **Культура / релігія:** {st['culture_name']} / {st['religion_name']}\n- **Валюта:** {st['coins']}")
-        L.append(f"- **Населення:** {fmt_n(s['pop'])} · **міст:** {len(burgs_list)} · **столиця:** {sim.bname(st['capital'])}")
-        L.append(f"- **Економіка:** ВВП/міс {fmt_n(s['gdp'])} од.; казна {fmt_n(s['treasury'])} ({LD.fmt_coins(s['treasury'])}); борг {fmt_n(s['debt'])}")
-        ib = st.get("income_breakdown", {})
-        if ib:
-            L.append("- **Бюджет/міс:** " + ", ".join(f"{k} {v:,.0f}" for k, v in ib.items()))
-        L.append(f"- **Стабільність:** {s['stab']:.0f} · легітимність {st['legitimacy']:.0f} · виснаження війною {st['war_exhaustion']:.0f} · їжа {st['food_sat']*100:.0f}%")
-        L.append("- **Армія:** " + ", ".join(f"{u} {n}" for u, n in st["army"].items()) + f" (сила {fmt_n(s['power'])}, готовність {st['readiness']:.2f})")
-        if st["mercs"]:
-            L.append("- **Найманці:** " + ", ".join(m["name"] for m in st["mercs"]))
+        r = st.get("ruler") or {}
+        fm = (f"---\ntags: [симуляція, авто, держава]\nоновлено: {yaml_scalar(E.date_str(sim.w))}\n"
+              f"континент: {yaml_scalar(st.get('continent'))}\n"
+              f"населення: {int(_num(s['pop']))}\nввп_міс: {_num(s['gdp']):.1f}\nказна: {_num(s['treasury']):.1f}\n"
+              f"стабільність: {_num(s['stab']):.1f}\nсила_армії: {_num(s['power']):.1f}\n"
+              f"війни: {len(PO.in_war(sim, sid))}\n---\n")
+        uk = md_escape(st.get("uk", "—"))
+        lore = md_escape(st.get("lore"))
+        L = [fm, "> [!warning] Файл генерується автоматично.\n", f"# {uk}\n",
+             f"*{md_escape(st.get('full_name'))}* · {md_escape(st.get('continent'))} · [[Світ]]\n",
+             lore + "\n" if lore else ""]
+        traits = ", ".join(md_escape((LD.RULER_TRAITS.get(t) or {}).get("label", t))
+                           for t in (r.get("traits") or []))
+        age = r.get("age")
+        L.append(f"- **Правитель:** {md_escape(r.get('name', '—'))}" + (f" ({_num(age):.0f} р.)" if age else "") +
+                 f" — {traits}")
+        L.append(f"- **Форма правління:** {md_escape(st.get('gov_text'))}\n"
+                 f"- **Культура / релігія:** {md_escape(st.get('culture_name'))} / {md_escape(st.get('religion_name'))}\n"
+                 f"- **Валюта:** {md_escape(st.get('coins'))}")
+        L.append(f"- **Населення:** {fmt_n(s['pop'])} · **міст:** {len(burgs_list)} · "
+                 f"**столиця:** {md_escape(sim.bname(st.get('capital')))}")
+        L.append(f"- **Економіка:** ВВП/міс {fmt_n(s['gdp'])} од.; казна {fmt_n(s['treasury'])} "
+                 f"({md_escape(LD.fmt_coins(s['treasury']))}); борг {fmt_n(s['debt'])}")
+        ib = st.get("income_breakdown") or {}
+        if isinstance(ib, dict) and ib:
+            L.append("- **Бюджет/міс:** " + ", ".join(f"{md_escape(k)} {_num(v):,.0f}" for k, v in ib.items()))
+        L.append(f"- **Стабільність:** {_num(st.get('stability')):.0f} · легітимність {_num(st.get('legitimacy')):.0f} · "
+                 f"виснаження війною {_num(st.get('war_exhaustion')):.0f} · їжа {_num(st.get('food_sat'))*100:.0f}%")
+        army = st.get("army") or {}
+        if not isinstance(army, dict):
+            army = {}
+        L.append("- **Армія:** " + ", ".join(f"{md_escape(u)} {_num(c):.0f}" for u, c in army.items()) +
+                 f" (сила {fmt_n(s['power'])}, готовність {_num(st.get('readiness')):.2f})")
+        mercs = st.get("mercs") or []
+        if isinstance(mercs, list) and mercs:
+            L.append("- **Найманці:** " + ", ".join(md_escape(m.get("name", "—")) for m in mercs if isinstance(m, dict)))
         ws = PO.in_war(sim, sid)
-        L.append("\n## Війни\n" + ("\n".join("- " + wars_line(sim, wr) for wr in ws) or "Мир."))
+        L.append("\n## Війни\n" + ("\n".join("- " + wars_line(sim, wr) for wr in ws if isinstance(wr, dict)) or "Мир."))
         low, high = top_relations(sim, sid, 5)
-        L.append("\n## Відносини\n\n**Найгірші:** " + ", ".join(f"{sim.sname(o)} ({sc:+.0f})" for sc, o in low) +
-                 "\n\n**Найкращі:** " + ", ".join(f"{sim.sname(o)} ({sc:+.0f})" for sc, o in high))
-        bl = sorted(burgs_list, key=lambda b: -sim.burgs[b]["pop"])[:12]
+        L.append("\n## Відносини\n\n**Найгірші:** " +
+                 ", ".join(f"{md_escape(sim.sname(o))} ({_num(sc):+.0f})" for sc, o in low) +
+                 "\n\n**Найкращі:** " +
+                 ", ".join(f"{md_escape(sim.sname(o))} ({_num(sc):+.0f})" for sc, o in high))
+        bl = sorted(burgs_list, key=lambda b: -_num(sim.burgs[b].get("pop")))[:12]
         L.append("\n## Найбільші міста\n\n| Місто | Населення | Ринок | Особливості |\n|---|---:|---|---|")
         for b in bl:
             bb = sim.burgs[b]
-            L.append(f"| {bb['uk']} | {fmt_n(bb['pop'] + bb['rural'])} | [[Ринки/{safe(sim.markets[bb['market']]['uk'])}\\|{sim.markets[bb['market']]['uk']}]] | "
-                     f"{'столиця ' if bb['capital'] else ''}{'порт ' if bb['port'] else ''}{'мури ' if bb['walls'] else ''}{'храм' if bb['temple'] else ''} |")
+            mk = sim.markets.get(bb.get("market")) or {}
+            mk_name = md_escape(mk.get("uk", "—"))
+            L.append(f"| {md_escape(bb.get('uk'))} | {fmt_n(_num(bb.get('pop')) + _num(bb.get('rural')))} | "
+                     f"[[Ринки/{safe(mk.get('uk')) or 'Без назви'}\\|{mk_name}]] | "
+                     f"{'столиця ' if bb.get('capital') else ''}{'порт ' if bb.get('port') else ''}"
+                     f"{'мури ' if bb.get('walls') else ''}{'храм' if bb.get('temple') else ''} |")
         pids = sim.state_provinces.get(sid, [])
         if pids:
             L.append("\n## Провінції та намісники\n\n| Провінція | Центр | Намісник | Лояльність | Спеціалізація | Статус |\n|---|---|---|---:|---|---|")
-            for pid in sorted(pids, key=lambda x: -sum(sim.burgs[b]["pop"] + sim.burgs[b]["rural"] for b in sim.provinces[x].get("burgs", []) if b in sim.burgs))[:25]:
-                pr = sim.provinces[pid]
+            for pid in sorted(pids, key=lambda x: -sum(_num(sim.burgs[b].get("pop")) + _num(sim.burgs[b].get("rural"))
+                                                       for b in (sim.provinces.get(x) or {}).get("burgs", []) if b in sim.burgs))[:25]:
+                pr = sim.provinces.get(pid) or {}
                 gov = pr.get("governor") or {}
                 occ = pr.get("occupied_by")
-                st_str = f"Окупована ({sim.sname(occ)})" if occ else (f"Облога {pr.get('siege', 0):.0f}%" if pr.get("siege", 0) > 0 else ("Корінна" if pr.get("core_state", sid) == sid else f"Анексована ({sim.sname(pr.get('core_state'))})"))
-                L.append(f"| {pr['uk']} | {sim.bname(pr.get('burg'))} | {gov.get('name', '—')} | {gov.get('loyalty', 70):.0f}% | {pr.get('specialty', '—')} | {st_str} |")
-        # індекс цін + роздрібні D&D-ціни столиці
-        L.append(f"\n## Ціни в державі\n\nІндекс цін на їжу: **{sim.price_index('food', sid):.2f}**, побут: {sim.price_index('utilities', sid):.2f}, розкіш: {sim.price_index('luxury', sid):.2f} "
+                siege = _num(pr.get("siege"))
+                st_str = (f"Окупована ({md_escape(sim.sname(occ))})" if occ else
+                          (f"Облога {siege:.0f}%" if siege > 0 else
+                           ("Корінна" if pr.get("core_state", sid) == sid else
+                            f"Анексована ({md_escape(sim.sname(pr.get('core_state')))})")))
+                L.append(f"| {md_escape(pr.get('uk'))} | {md_escape(sim.bname(pr.get('burg')))} | "
+                         f"{md_escape(gov.get('name', '—'))} | {_num(gov.get('loyalty'), 70):.0f}% | "
+                         f"{md_escape(pr.get('specialty', '—'))} | {st_str} |")
+        L.append(f"\n## Ціни в державі\n\nІндекс цін на їжу: **{sim.price_index('food', sid):.2f}**, "
+                 f"побут: {sim.price_index('utilities', sid):.2f}, розкіш: {sim.price_index('luxury', sid):.2f} "
                  f"(множник до роздрібних цін з [[Ціна]]).")
-        cap_id = st["capital"] if st["capital"] in sim.burgs else bl[0]
-        retail = DT.city_retail_prices(sim, cap_id)
-        L.append(f"\n### Роздрібні D&D-ціни ({retail['burg_uk']})\n\n| Позиція | Ціна | % бази | Наявність |\n|---|---:|---:|---|")
-        for it in retail["items"][:12]:
-            L.append(f"| {it['name']} | {it['coins']} | {it['pct']}% | {it['status']} |")
-        ev = [r for r in sim.w["journal"] if sid in (r.get("states") or []) or r.get("state") == sid][-12:][::-1]
-        L.append("\n## Хроніка\n" + "\n".join(f"- *{LD.MONTHS_UK[r['m']-1]} {r['y']}* — {r['text']}" for r in ev))
-        _w(os.path.join(states_dir, fname), "\n".join(L) + "\n")
+        cap = st.get("capital")
+        cap_id = cap if isinstance(cap, int) and cap in sim.burgs else (bl[0] if bl else None)
+        if cap_id in sim.burgs:
+            try:
+                retail = DT.city_retail_prices(sim, cap_id)
+                L.append(f"\n### Роздрібні D&D-ціни ({md_escape(retail['burg_uk'])})\n\n"
+                         f"| Позиція | Ціна | % бази | Наявність |\n|---|---:|---:|---|")
+                for it in retail["items"][:12]:
+                    L.append(f"| {md_escape(it.get('name'))} | {md_escape(it.get('coins'))} | "
+                             f"{it.get('pct')}% | {md_escape(it.get('status'))} |")
+            except Exception:
+                pass
+        ev = [r for r in (sim.w.get("journal") or []) if isinstance(r, dict) and
+              (sid in (r.get("states") or []) or r.get("state") == sid)][-12:][::-1]
+        L.append("\n## Хроніка\n" + "\n".join(
+            f"- *{month_name(r.get('m'))} {md_escape(r.get('y'))}* — {md_escape(r.get('text'))}" for r in ev))
+        _w(os.path.join(states_dir, fname), "\n".join(L) + "\n", vault=vault, used=used)
         n += 1
 
-    # Архівація неактивних або ліквідованих держав
-    if os.path.isdir(states_dir):
-        for fn in os.listdir(states_dir):
-            if fn.endswith(".md") and fn not in active_files:
-                os.makedirs(archive_dir, exist_ok=True)
-                shutil.move(os.path.join(states_dir, fn), os.path.join(archive_dir, fn))
+    # Не чіпаємо чужі нотатки: генератор не повинен архівувати користувацькі файли.
     return n
 
 
-def write_markets(sim, vault, hdr):
+def write_markets(sim, vault, hdr, used=None):
     n = 0
     for mid, m in sim.markets.items():
-        sid = sim.market_state[mid]
-        L = [hdr, f"# Ринок {m['uk']}\n", f"Держава: [[Держави/{safe(sim.sname(sid))}\\|{sim.sname(sid)}]] · міст на ринку: {len(m['burgs'])} · "
-             f"торгових шляхів: {len(m['edges'])}\n"]
+        sid = sim.market_state.get(mid)
+        sname = md_escape(sim.sname(sid))
+        L = [hdr, f"# Ринок {md_escape(m.get('uk'))}\n",
+             f"Держава: [[Держави/{safe(sim.sname(sid)) or 'Без назви'}\\|{sname}]] · "
+             f"міст на ринку: {len(m.get('burgs') or [])} · торгових шляхів: {len(m.get('edges') or [])}\n"]
         routes = []
-        for ei in m["edges"]:
-            e = sim.edges[ei]
-            o = e["b"] if e["a"] == mid else e["a"]
-            routes.append(f"{sim.markets[o]['uk']} ({e['dist']:.0f} км, {'море' if e['sea'] else 'суша'}, потік {e.get('flow', 0):.0f})")
+        for ei in (m.get("edges") or []):
+            edges = sim.edges
+            if isinstance(edges, dict):
+                e = edges.get(ei)
+            elif isinstance(edges, (list, tuple)) and 0 <= int(ei) < len(edges):
+                e = edges[int(ei)]
+            else:
+                e = None
+            if not isinstance(e, dict):
+                continue
+            o = e.get("b") if e.get("a") == mid else e.get("a")
+            other = sim.markets.get(o) or {}
+            routes.append(f"{md_escape(other.get('uk', '—'))} ({_num(e.get('dist')):.0f} км, "
+                          f"{'море' if e.get('sea') else 'суша'}, потік {_num(e.get('flow')):.0f})")
         L.append("**Маршрути:** " + "; ".join(routes) + "\n")
         L.append("| Товар | Ціна | Монети | % бази | Запас |\n|---|---:|---|---:|---:|")
-        for g in sorted(m["price"], key=lambda g: -sim.goods[g]["value"]):
-            p = m["price"][g]
-            base = sim.goods[g]["value"]
-            L.append(f"| {LD.good_uk(g, sim.goods)} ({sim.goods[g]['unit']}) | {p:.2f} | {LD.fmt_coins(p)} | {p/base*100:.0f}% | {m['stock'].get(g, 0):.0f} |")
-        _w(os.path.join(vault, "Ринки", safe(m["uk"]) + ".md"), "\n".join(L) + "\n")
+        for g in sorted(m.get("price") or {}, key=lambda g: -_num((sim.goods.get(g) or {}).get("value"))):
+            p = _num(m["price"][g])
+            base = max(_num((sim.goods.get(g) or {}).get("value")), 1e-9)
+            unit = md_escape((sim.goods.get(g) or {}).get("unit", "—"))
+            L.append(f"| {md_escape(LD.good_uk(g, sim.goods))} ({unit}) | {p:.2f} | {md_escape(LD.fmt_coins(p))} | "
+                     f"{p/base*100:.0f}% | {_num((m.get('stock') or {}).get(g)):.0f} |")
+        _w(os.path.join(vault, "Ринки", file_name(m.get("uk"))), "\n".join(L) + "\n", vault=vault, used=used)
         n += 1
     return n
 
 
-def write_goods(sim, vault, hdr):
+def write_goods(sim, vault, hdr, used=None):
     L = [hdr, "# Товари: світові ціни\n\nОдиниця вартості = 1 віз зерна ≈ 1 зм (оптові лоти, не роздріб).\n",
          "| Товар | Одиниця | База | Мін | Середня | Макс | Де дешево | Де дорого |\n|---|---|---:|---:|---:|---:|---|---|"]
+    markets = [m for m in sim.markets.values() if isinstance(m, dict)]
     for g in sorted(sim.goods):
-        rows = sorted((m["price"].get(g, 0), m["uk"]) for m in sim.markets.values())
+        rows = sorted((_num((m.get("price") or {}).get(g)), m.get("uk", "—")) for m in markets)
+        if not rows:
+            continue
         avg = sum(p for p, _ in rows) / len(rows)
-        L.append(f"| {LD.good_uk(g, sim.goods)} | {sim.goods[g]['unit']} | {sim.goods[g]['value']} | {rows[0][0]:.2f} | {avg:.2f} | {rows[-1][0]:.2f} | {rows[0][1]} | {rows[-1][1]} |")
-    _w(os.path.join(vault, "Товари.md"), "\n".join(L) + "\n")
+        good = sim.goods.get(g) or {}
+        L.append(f"| {md_escape(LD.good_uk(g, sim.goods))} | {md_escape(good.get('unit', '—'))} | "
+                 f"{md_escape(good.get('value', '—'))} | {rows[0][0]:.2f} | {avg:.2f} | {rows[-1][0]:.2f} | "
+                 f"{md_escape(rows[0][1])} | {md_escape(rows[-1][1])} |")
+    _w(os.path.join(vault, "Товари.md"), "\n".join(L) + "\n", vault=vault, used=used)
     return 1
 
 
-def write_journal(sim, vault, hdr):
-    path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "save", "journal.jsonl")
+def write_journal(sim, vault, hdr, used=None):
+    """Експорт журналу: лише коректні роки/місяці, обмежений обсяг, без чужих шляхів."""
     import json
-    rows = []
-    if os.path.exists(path):
-        with open(path, encoding="utf-8") as f:
-            rows = [json.loads(x) for x in f if x.strip()]
+    default_path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "save", "journal.jsonl")
+    rows = [r for r in (sim.w.get("journal") or []) if isinstance(r, dict)][:MAX_JOURNAL_LINES]
+    if not rows:
+        path = getattr(sim, "journal_path", None)
+        meta = sim.w.get("meta") or {}
+        meta_path = meta.get("journal_file")
+        # Шлях із метаданих світу не є довіреним: приймаємо лише сусідній файл.
+        if not path and meta_path and _within(os.path.dirname(default_path), str(meta_path)):
+            path = meta_path
+        path = path or default_path
+        try:
+            if os.path.isfile(path):
+                with open(path, encoding="utf-8") as f:
+                    for line in f:
+                        if len(rows) >= MAX_JOURNAL_LINES:
+                            break
+                        if not line.strip():
+                            continue
+                        try:
+                            rec = json.loads(line)
+                        except (ValueError, TypeError):
+                            continue
+                        if isinstance(rec, dict):
+                            rows.append(rec)
+        except (OSError, UnicodeError):
+            pass
     by_year = collections.defaultdict(list)
     for r in rows:
-        by_year[r["y"]].append(r)
-    era = sim.w.get("meta", {}).get("era", LD.ERA_SHORT)
-    for y, rs in by_year.items():
+        y = _bounded_int(r.get("y"), 1, 9999)
+        m = _bounded_int(r.get("m"), 1, 12)
+        if y is None or m is None:
+            continue
+        by_year[y].append(dict(r, y=y, m=m))
+    era = md_escape((sim.w.get("meta") or {}).get("era", LD.ERA_SHORT))
+    journal_dir = os.path.join(vault, "Журнал")
+    written = 0
+    for y in sorted(by_year):
+        rs = by_year[y]
+        # y вже int, але перевірка контейнера лишається обов'язковою.
+        target = os.path.join(journal_dir, f"{int(y)}.md")
+        if not _within(journal_dir, target):
+            continue
         L = [hdr, f"# Журнал {y} {era}\n"]
         cur = None
         for r in rs:
             if r["m"] != cur:
                 cur = r["m"]
-                L.append(f"\n### {LD.MONTHS_UK[cur-1]}\n")
-            L.append(f"- `{r['kind']}` {r['text']}")
-        _w(os.path.join(vault, "Журнал", f"{y}.md"), "\n".join(L) + "\n")
-    return len(by_year)
+                L.append(f"\n### {month_name(cur)}\n")
+            L.append(f"- `{md_escape(r.get('kind'))}` {md_escape(r.get('text'))}")
+        _w(target, "\n".join(L) + "\n", vault=vault, used=used)
+        written += 1
+    return written
 
 
-def write_misc(sim, vault, hdr):
+def write_misc(sim, vault, hdr, used=None):
     w = sim.w
     # війни
     L = [hdr, "# Війни\n\n## Активні\n"]
-    L.append("\n".join("- " + wars_line(sim, wr) for wr in w["wars"]) or "Мир.")
+    L.append("\n".join("- " + wars_line(sim, wr) for wr in (w.get("wars") or []) if isinstance(wr, dict)) or "Мир.")
     L.append("\n## Завершені\n")
-    for h in w["war_history"][-60:][::-1]:
-        a, d = h["attacker"], h["defender"]
-        L.append(f"- {h['name']} ({h['start']}–{h.get('end') or '…'}): {sim.sname(a)} проти {sim.sname(d)}" + (f" — {h['result']}" if h.get("result") else ""))
-    _w(os.path.join(vault, "Війни.md"), "\n".join(L) + "\n")
+    for h in (w.get("war_history") or [])[-60:][::-1]:
+        if not isinstance(h, dict):
+            continue
+        L.append(f"- {md_escape(h.get('name'))} ({md_escape(h.get('start'))}–{md_escape(h.get('end') or '…')}): "
+                 f"{md_escape(sim.sname(h.get('attacker')))} проти {md_escape(sim.sname(h.get('defender')))}" +
+                 (f" — {md_escape(h.get('result'))}" if h.get("result") else ""))
+    _w(os.path.join(vault, "Війни.md"), "\n".join(L) + "\n", vault=vault, used=used)
     # гільдії
     L = [hdr, "# Гільдії та найманці\n\n## Гільдії\n\n| Гільдія | Тип | Місто | Багатство | Монополії |\n|---|---|---|---:|---|"]
-    for g in w["guilds"]:
-        L.append(f"| {g['name']} | {g['kind']} | {sim.bname(g['burg'])} ({sim.sname(g['state'])}) | {fmt_n(g['wealth'])} | {', '.join(LD.good_uk(x, sim.goods) for x in g['goods'])} |")
+    for g in (w.get("guilds") or []):
+        if not isinstance(g, dict):
+            continue
+        goods = ", ".join(md_escape(LD.good_uk(x, sim.goods)) for x in (g.get("goods") or []))
+        L.append(f"| {md_escape(g.get('name'))} | {md_escape(g.get('kind'))} | "
+                 f"{md_escape(sim.bname(g.get('burg')))} ({md_escape(sim.sname(g.get('state')))}) | "
+                 f"{fmt_n(_num(g.get('wealth')))} | {goods} |")
     L.append("\n## Найманці\n")
-    for m in w["mercs"]:
-        emp = sim.sname(m["employer"]) if m["employer"] and sim.tick_index() < (m["contract_end"] or 0) else "вільні"
-        L.append(f"- **{m['name']}** — {m['size']} бійців ({m['unit']}); база: {sim.sname(m['home']) if m['home'] else '—'}; зараз: {emp}")
+    for m in (w.get("mercs") or []):
+        if not isinstance(m, dict):
+            continue
+        emp = (md_escape(sim.sname(m.get("employer")))
+               if m.get("employer") and sim.tick_index() < _num(m.get("contract_end")) else "вільні")
+        home = md_escape(sim.sname(m.get("home"))) if m.get("home") else "—"
+        L.append(f"- **{md_escape(m.get('name'))}** — {_num(m.get('size')):.0f} бійців ({md_escape(m.get('unit'))}); "
+                 f"база: {home}; зараз: {emp}")
     L.append("\n## Ордени\n")
-    for o in w["orders"]:
-        L.append(f"- **{o['name']}** — {o['strength']} ({o['unit']}), держава: {sim.sname(o['state']) if o['state'] else 'наддержавний'}")
-    _w(os.path.join(vault, "Гільдії та найманці.md"), "\n".join(L) + "\n")
+    for o in (w.get("orders") or []):
+        if not isinstance(o, dict):
+            continue
+        owner = md_escape(sim.sname(o.get("state"))) if o.get("state") else "наддержавний"
+        L.append(f"- **{md_escape(o.get('name'))}** — {_num(o.get('strength')):.0f} ({md_escape(o.get('unit'))}), держава: {owner}")
+    _w(os.path.join(vault, "Гільдії та найманці.md"), "\n".join(L) + "\n", vault=vault, used=used)
     # похід
-    cr = w["crusade"]
-    L = [hdr, f"# {cr['name']}\n\n**Фаза:** {cr['phase']} · готовність постачання {cr['progress']*100:.0f}% · результат: {cr['result'] or 'невідомий'}\n",
-         "**Спонсори:** " + ", ".join(sim.sname(s) for s in cr["sponsors"] if s in sim.states) + "\n",
+    cr = w.get("crusade") or {}
+    L = [hdr, f"# {md_escape(cr.get('name'))}\n\n**Фаза:** {md_escape(cr.get('phase'))} · "
+              f"готовність постачання {_num(cr.get('progress'))*100:.0f}% · "
+              f"результат: {md_escape(cr.get('result') or 'невідомий')}\n",
+         "**Спонсори:** " + ", ".join(md_escape(sim.sname(s)) for s in (cr.get("sponsors") or []) if s in sim.states) + "\n",
          "Дивись [[Четвертий Похід на Кірос]] та [[Хронологія Епох і Походи на Кірос]]."]
     L.append("\n## Журнал Походу\n")
-    for r in [r for r in w["journal"] if r["kind"] == "crusade"]:
-        L.append(f"- *{LD.MONTHS_UK[r['m']-1]} {r['y']}* — {r['text']}")
-    _w(os.path.join(vault, "Похід на Кірос.md"), "\n".join(L) + "\n")
-    _w(os.path.join(vault, "Правила симуляції.md"), RULES_MD.replace("{hdr}", hdr))
-    return 4
+    for r in [r for r in (w.get("journal") or []) if isinstance(r, dict) and r.get("kind") == "crusade"]:
+        L.append(f"- *{month_name(r.get('m'))} {md_escape(r.get('y'))}* — {md_escape(r.get('text'))}")
+    _w(os.path.join(vault, "Похід на Кірос.md"), "\n".join(L) + "\n", vault=vault, used=used)
+    n = (3 + write_quests(sim, vault, hdr, used=used) +
+         write_route_notes(sim, vault, hdr, used=used) +
+         write_npc_notes(sim, vault, hdr, used=used))
+    _w(os.path.join(vault, "Правила симуляції.md"), rules_text(sim, hdr), vault=vault, used=used)
+    return n + 1
 
 
-RULES_MD = """{hdr}
+def write_quests(sim, vault, hdr, used=None):
+    # Експорт не змінює стан світу: прострочення обробляє ГМ через dnd_tools.
+    board = sim.w.get("quests") or {}
+    if not isinstance(board, dict):
+        board = {}
+    L = [hdr, "# Квести та доручення\n\nАктивні справи й чутки, зібрані з подій, війн, епідемій і дефіцитів.\n"]
+    L.append("## Прийняті\n")
+    active = [q for q in (board.get("active") or []) if isinstance(q, dict)]
+    L.append("\n".join(
+        f"- **{md_escape(q.get('title'))}** ({md_escape(q.get('patron', '—'))}, нагорода "
+        f"{md_escape(q.get('reward', '—'))}, термін до tick {md_escape(q.get('due_tick', '—'))}): "
+        f"{md_escape(q.get('text', ''))}" for q in active) or "- Немає активних доручень.")
+    L.append("\n## Дошка оголошень\n")
+    try:
+        hooks = DT.generate_quest_hooks(sim, limit=12)
+    except Exception:
+        hooks = []
+    for h in hooks:
+        if not isinstance(h, dict):
+            continue
+        L.append(f"- **[{md_escape(h.get('category'))}] {md_escape(h.get('title'))}** — "
+                 f"{md_escape(h.get('patron', '—'))}; нагорода {md_escape(h.get('reward', '—'))}. "
+                 f"{md_escape(h.get('text', ''))}")
+    L.append("\n## Завершені\n")
+    for q in [q for q in (board.get("completed") or []) if isinstance(q, dict)][-12:][::-1]:
+        L.append(f"- {md_escape(q.get('title'))} — {md_escape(q.get('status'))}, "
+                 f"виплачено {_num(q.get('paid_zm')):.0f} зм")
+    _w(os.path.join(vault, "Квести.md"), "\n".join(L) + "\n", vault=vault, used=used)
+    return 1
+
+
+def write_route_notes(sim, vault, hdr, used=None):
+    top = sorted(sim.burgs.values(), key=lambda b: -(_num(b.get("pop")) + _num(b.get("rural"))))[:8]
+    L = [hdr, "# Маршрути та небезпека\n\nОцінка шляхів між найбільшими містами для планування D&D-сесії.\n"]
+    L.append("| Звідки | Куди | Режим | Км | Днів | Вартість | Небезпека | Зустрічі |")
+    L.append("|---|---|---|---:|---:|---:|---|---|")
+    for a in top:
+        for b in top:
+            if a.get("id", 0) >= b.get("id", 0):
+                continue
+            try:
+                rt = DT.travel_route(sim, a["id"], b["id"], mode="wagon")
+            except Exception:
+                continue
+            L.append(f"| {md_escape(a.get('uk'))} | {md_escape(b.get('uk'))} | {md_escape(rt.get('mode_name'))} | "
+                     f"{rt.get('total_km')} | {rt.get('total_days')} | {md_escape(rt.get('cost_coins'))} | "
+                     f"{rt.get('danger_score')} ({md_escape(rt.get('danger_level'))}) | "
+                     f"{len(rt.get('encounters') or [])} |")
+    _w(os.path.join(vault, "Маршрути та небезпека.md"), "\n".join(L) + "\n", vault=vault, used=used)
+    return 1
+
+
+def write_npc_notes(sim, vault, hdr, used=None):
+    L = [hdr, "# Персонажі та фракції\n\nГотові заготовки для швидкого запуску сцени.\n"]
+    for _ in range(6):
+        try:
+            npc = DT.generate_npc(sim)
+        except Exception:
+            continue
+        if not isinstance(npc, dict):
+            continue
+        L.append(f"\n## {md_escape(npc.get('name'))} — {md_escape(npc.get('role'))}\n")
+        traits = ", ".join(md_escape(t) for t in (npc.get("traits") or []))
+        L.append(f"- **Фракція:** {md_escape(npc.get('faction'))}\n- **Місце:** {md_escape(npc.get('location'))}\n"
+                 f"- **Риси:** {traits}\n- **Привід:** {md_escape(npc.get('hook'))}")
+    L.append("\n## Гільдії й держустанови\n")
+    for g in (sim.w.get("guilds") or []):
+        if isinstance(g, dict):
+            L.append(f"- {md_escape(g.get('name'))} ({md_escape(g.get('kind', '—'))}), "
+                     f"база: {md_escape(sim.bname(g.get('burg')))}")
+    _w(os.path.join(vault, "Персонажі та фракції.md"), "\n".join(L) + "\n", vault=vault, used=used)
+    return 1
+
+
+def rules_text(sim, hdr):
+    cfg = sim.w.get("config", {}) or {}
+    goods_n = len(sim.goods)
+    event_n = len(getattr(LD, "EVENT_TABLE", {}))
+    recipes_n = sum(len(g.get("recipes", [])) for g in sim.goods.values())
+    return f"""{hdr}
 # Правила симуляції економіки та подій
 
-Крок = 1 місяць. Дані з карти Azgaar (`Feria 2026-09-21-12-26.map`): 73 держави, 933 міста, 47 ринків, 71 товар із рецептами.
+Крок = 1 місяць. Світ: {len(sim.states)} держав, {len(sim.burgs)} міст, {len(sim.markets)} ринків, {goods_n} товарів, {recipes_n} варіантів рецептів.
 
-1. **Виробництво.** Село (кожна клітинка карти віддає сировину ринку за біомом/родовищем) + ремесло міст за рецептами (`Інструменти = Залізо + Вугілля` тощо). Сезонність за широтою (південна півкуля — інвертована).
-2. **Торгівля.** Купці везуть товар між сусідніми ринками, якщо різниця цін > вартість перевезення + мито. Мито залежить від відносин держав; війна й ембарго майже зупиняють торгівлю (контрабанда).
-3. **Споживання.** Їжа, побут/паливо, будівництво, розкіш; нестача їжі = смертність, нестача палива взимку = смертність.
-4. **Ціни.** `ціна = база × (цільовий запас / запас)^0.5`, межі 0.3×…6× бази.
-5. **Держави.** Податки (подушний + з продажу + мито), утримання армії та двору, закупівля військового спорядження. Борг → жорстка економія → бунти.
-6. **Політика.** Відносини (-100…100) дрейфують; війни ведуться за співвідношенням сил, облоги забирають міста; мир із контрибуцією; найманці й ордени.
-7. **Події.** 35 типів: природа, епідемії (поширюються торговими шляхами), економіка, політика, магія. Таблиця у `lore_data.py`.
-8. **Похід на Кірос.** Сценарій із фазами: збір → перехід → кампанія → результат (залежить від постачання кораблів, зброї, консервів).
+1. **Виробництво.** Сировина за біомом/родовищем плюс ремесло міст. Рецепти обираються щомісяця за поточними цінами; збиткові цехи зупиняються. Сезонність за широтою.
+2. **Торгівля.** Купці везуть товар, якщо різниця цін перевищує перевезення й мито. Торгівля обмежена капіталом ринку; один товар не можна перепродати двічі в тому ж місяці.
+3. **Споживання.** Їжа, побут, будівництво, розкіш. Попит помірно реагує на ціну; нестача впливає на смертність і стабільність.
+4. **Ціни.** `ціна = база × (цільовий запас / запас)^0.5`, межі 0.3×…6× бази; згладжування 35%/міс.
+5. **Держави.** Податки, утримання армії, закупівля спорядження. Борг викликає жорстку економію; позики гільдій реально переказуються в казну.
+6. **Політика.** Відносини (-100…100), війни, облоги, анексії з поступовою асиміляцією; технології обмежені й повільно повертаються до бази.
+7. **Події.** {event_n} типів; частота масштабується розміром світу, кількість на місяць обмежена. Деякі події мають варіанти рішень для ГМ.
+8. **D&D інструменти.** Роздрібні ціни залежать від ринку, податків, війни й Іржі; маршрути мають реальну надбавку за небезпеку; квести можна приймати й закривати.
 
-**Монети:** 1 од. = 1 зм = 100 см = 10 000 мм (курс сховища [[Ціна]]).
-**Керування:** `python -m feria_sim run --months 1 --report`, `fire`, `declare`, `set`, `city`, `price`, `retail`, `route`, `quests`, `undo`.
+**Налаштування:** event_rate={md_escape(cfg.get('event_rate', 1))}, war_rate={md_escape(cfg.get('war_rate', 1))}, carry_cap={md_escape(cfg.get('carry_cap', 1.65))}, tech_cap={md_escape(cfg.get('tech_cap', 3.0))}.
+**Монети:** 1 од. = 1 зм = 100 см = 10 000 мм.
+**Керування:** `python -m feria_sim run --months 1 --report`, `fire`, `declare`, `peace`, `set`, `city`, `price`, `retail`, `route`, `quests`, `npc`, `undo`.
 """
 
 
-def write_session_prep(sim, vault, hdr):
+def write_session_prep(sim, vault, hdr, used=None):
     w = sim.w
     cur_t = sim.tick_index()
-    y0 = w.get("meta", {}).get("start_year", LD.START_YEAR)
-    recent = [r for r in w["journal"] if ((r["y"] - y0) * 12 + r["m"] - 1) >= cur_t - 3][-25:][::-1]
-    L = [hdr, f"# Підготовка до наступної сесії ({E.date_str(w)})\n",
+    y0 = _num((w.get("meta") or {}).get("start_year", LD.START_YEAR), LD.START_YEAR)
+    recent = []
+    for r in (w.get("journal") or []):
+        if not isinstance(r, dict):
+            continue
+        try:
+            if ((_num(r.get("y"), 0.0) - y0) * 12 + _num(r.get("m"), 1.0) - 1) >= cur_t - 3:
+                recent.append(r)
+        except (TypeError, ValueError):
+            continue
+    recent = recent[-25:][::-1]
+    L = [hdr, f"# Підготовка до наступної сесії ({md_escape(E.date_str(w))})\n",
          "Швидке зведення для Майстра гри: останні події, готові квестові гачки та роздрібні D&D-ціни у найбільших містах.\n",
          "## Події за останні 3 місяці\n"]
     if recent:
         for r in recent:
-            L.append(f"- *{LD.MONTHS_UK[r['m']-1]} {r['y']}* (`{r['kind']}`) — {r['text']}")
+            L.append(f"- *{month_name(r.get('m'))} {md_escape(r.get('y'))}* "
+                     f"(`{md_escape(r.get('kind'))}`) — {md_escape(r.get('text'))}")
     else:
         L.append("- За останні місяці великих змін не зафіксовано.")
 
     L.append("\n## Квестові гачки та чутки для партії\n")
-    hooks = DT.generate_quest_hooks(sim, limit=10)
+    try:
+        hooks = DT.generate_quest_hooks(sim, limit=10)
+    except Exception:
+        hooks = []
     for h in hooks:
-        L.append(f"- **[{h['category']}] {h['title']}** (*{h['patron']}*, нагорода: **{h['reward']}**, {h['urgency']}): {h['text']}")
+        if not isinstance(h, dict):
+            continue
+        L.append(f"- **[{md_escape(h.get('category'))}] {md_escape(h.get('title'))}** "
+                 f"(*{md_escape(h.get('patron'))}*, нагорода: **{md_escape(h.get('reward'))}**, "
+                 f"{md_escape(h.get('urgency'))}): {md_escape(h.get('text'))}")
 
     L.append("\n## Роздрібні D&D-ціни у 6 найбільших містах\n")
-    top_cities = sorted(sim.burgs.values(), key=lambda b: -(b["pop"] + b["rural"]))[:6]
+    top_cities = sorted(sim.burgs.values(), key=lambda b: -(_num(b.get("pop")) + _num(b.get("rural"))))[:6]
     if top_cities:
         pick_ids = ["inn_modest", "rations", "longsword", "chain_mail", "warhorse", "healing_potion"]
-        cols = [next(it["name"] for it in DT.RETAIL_CATALOG if it["id"] == pid) for pid in pick_ids]
+        names = {it.get("id"): it.get("name", "—") for it in DT.RETAIL_CATALOG}
+        cols = [md_escape(names.get(pid, pid)) for pid in pick_ids]
         L.append("| Місто (Держава) | " + " | ".join(cols) + " |")
         L.append("|---|" + "|".join("---:" for _ in cols) + "|")
         for b in top_cities:
-            rt = DT.city_retail_prices(sim, b["id"])
-            by_id = {it["id"]: it["coins"] for it in rt["items"]}
-            L.append(f"| {b['uk']} ({sim.sname(b['state'])}) | " + " | ".join(by_id[pid] for pid in pick_ids) + " |")
+            try:
+                rt = DT.city_retail_prices(sim, b["id"])
+            except Exception:
+                continue
+            by_id = {it.get("id"): it.get("coins", "—") for it in rt.get("items", [])}
+            L.append(f"| {md_escape(b.get('uk'))} ({md_escape(sim.sname(b.get('state')))}) | " +
+                     " | ".join(md_escape(by_id.get(pid, "—")) for pid in pick_ids) + " |")
 
-    _w(os.path.join(vault, "Наступна сесія.md"), "\n".join(L) + "\n")
+    _w(os.path.join(vault, "Наступна сесія.md"), "\n".join(L) + "\n", vault=vault, used=used)
     return 1

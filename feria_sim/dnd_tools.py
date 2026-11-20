@@ -1,13 +1,53 @@
 # -*- coding: utf-8 -*-
 """Прикладні інструменти для Майстра гри (D&D 5e): роздрібні ціни, маршрути подорожі, квестові гачки."""
+import hashlib
 import heapq
 import math
+import random
+import re
+import uuid
 
 from . import lore_data as LD
 from . import engine as E
 from . import politics as PO
 
 COIN_NAMES = [("пм", 1_000_000), ("зм", 10_000), ("см", 100), ("мм", 1)]
+
+# Stable ids from goods_default.json. LD.GOOD_IDS wins when the core workstream
+# has installed it; the local table keeps D&D tools working on older saves.
+_FALLBACK_GOOD_IDS = {
+    "wood": 1, "stone": 2, "marble": 3, "iron": 4, "copper": 5, "tin": 6,
+    "silver": 7, "gold": 8, "grain": 9, "cattle": 10, "fish": 11, "game": 12,
+    "wine": 13, "olives": 14, "honey": 15, "salt": 16, "dates": 17,
+    "horses": 18, "elephants": 19, "camels": 20, "hemp": 21, "pearls": 22,
+    "gemstones": 23, "dyes": 24, "incense": 25, "silk": 26, "spices": 27,
+    "amber": 28, "furs": 29, "sheep": 30, "slaves": 31, "tar": 32,
+    "saltpeter": 33, "coal": 34, "oil": 35, "mahogany": 36, "whales": 37,
+    "sugarcane": 38, "tea": 39, "tobacco": 40, "clay": 41, "white_sand": 42,
+    "leather": 43, "cloth": 44, "garments": 45, "ceramics": 46, "glass": 47,
+    "ropes": 48, "paper": 49, "ink": 50, "books": 51, "sails": 52,
+    "ships": 53, "boots": 54, "harnesses": 55, "barrels": 56, "bronze": 57,
+    "tools": 58, "arms": 59, "gunpowder": 60, "artillery": 61, "coins": 62,
+    "jewelry": 63, "preserved_food": 64, "vinegar": 65, "cheese": 66,
+    "beer": 67, "liquor": 68, "candles": 69, "soap": 70, "perfume": 71,
+}
+
+
+def _gid(name, fallback=None):
+    """Resolve a canonical good id without breaking on older lore modules."""
+    ids = getattr(LD, "GOOD_IDS", None)
+    if isinstance(ids, dict) and name in ids:
+        try:
+            return int(ids[name])
+        except (TypeError, ValueError):
+            pass
+    if fallback is not None:
+        try:
+            return int(fallback)
+        except (TypeError, ValueError):
+            pass
+    # Unknown ids must not make catalog construction fail on a partial save.
+    return int(_FALLBACK_GOOD_IDS.get(name, 0))
 
 RETAIL_CATEGORIES = [
     "Таверна та їжа",
@@ -19,36 +59,36 @@ RETAIL_CATEGORIES = [
 
 RETAIL_CATALOG = [
     # Таверна та їжа
-    dict(id="ale_mug", name="Кухоль елю", cat="Таверна та їжа", base_mm=400, weights={67: 0.7, 9: 0.3}, rust=False),
-    dict(id="wine_flask", name="Фляга вина", cat="Таверна та їжа", base_mm=2500, weights={13: 1.0}, rust=False),
-    dict(id="inn_poor", name="Таверна: бідний обід і нічліг", cat="Таверна та їжа", base_mm=600, weights={9: 0.7, 34: 0.3}, rust=False),
-    dict(id="inn_modest", name="Таверна: скромний постій", cat="Таверна та їжа", base_mm=2000, weights={9: 0.4, 10: 0.3, 67: 0.3}, rust=False),
-    dict(id="inn_comf", name="Таверна: комфортний постій", cat="Таверна та їжа", base_mm=8000, weights={10: 0.4, 66: 0.3, 13: 0.3}, rust=False),
-    dict(id="inn_wealthy", name="Таверна: багатий постій", cat="Таверна та їжа", base_mm=25000, weights={13: 0.4, 27: 0.3, 63: 0.3}, rust=False),
-    dict(id="rations", name="Дорожній пайок (1 день)", cat="Таверна та їжа", base_mm=1500, weights={64: 0.6, 9: 0.4}, rust=False),
+    dict(id="ale_mug", name="Кухоль елю", cat="Таверна та їжа", base_mm=400, weights={_gid("beer"): 0.7, _gid("grain"): 0.3}, rust=False, units=1),
+    dict(id="wine_flask", name="Фляга вина", cat="Таверна та їжа", base_mm=2500, weights={_gid("wine"): 1.0}, rust=False, units=1),
+    dict(id="inn_poor", name="Таверна: бідний обід і нічліг", cat="Таверна та їжа", base_mm=600, weights={_gid("grain"): 0.7, _gid("coal"): 0.3}, rust=False, units=1),
+    dict(id="inn_modest", name="Таверна: скромний постій", cat="Таверна та їжа", base_mm=2000, weights={_gid("grain"): 0.4, _gid("cattle"): 0.3, _gid("beer"): 0.3}, rust=False, units=1),
+    dict(id="inn_comf", name="Таверна: комфортний постій", cat="Таверна та їжа", base_mm=8000, weights={_gid("cattle"): 0.4, _gid("cheese"): 0.3, _gid("wine"): 0.3}, rust=False, units=1),
+    dict(id="inn_wealthy", name="Таверна: багатий постій", cat="Таверна та їжа", base_mm=25000, weights={_gid("wine"): 0.4, _gid("spices"): 0.3, _gid("jewelry"): 0.3}, rust=False, units=1),
+    dict(id="rations", name="Дорожній пайок (1 день)", cat="Таверна та їжа", base_mm=1500, weights={_gid("preserved_food"): 0.6, _gid("grain"): 0.4}, rust=False, units=1),
     # Спорядження й побут
-    dict(id="torch_bundle", name="Факел (в'язка 5 шт.)", cat="Спорядження й побут", base_mm=100, weights={1: 0.6, 32: 0.4}, rust=False),
-    dict(id="lamp_oil", name="Олія для ліхтаря (фляга)", cat="Спорядження й побут", base_mm=500, weights={35: 0.6, 37: 0.4}, rust=False),
-    dict(id="rope_50", name="Мотузка конопляна (50 фт)", cat="Спорядження й побут", base_mm=1000, weights={48: 0.7, 21: 0.3}, rust=False),
-    dict(id="artisan_tools", name="Набір ремісничих інструментів", cat="Спорядження й побут", base_mm=50000, weights={58: 0.8, 4: 0.2}, rust=True),
-    dict(id="travel_clothes", name="Дорожній одяг і плащ", cat="Спорядження й побут", base_mm=15000, weights={45: 0.6, 54: 0.4}, rust=False),
+    dict(id="torch_bundle", name="Факел (в'язка 5 шт.)", cat="Спорядження й побут", base_mm=100, weights={_gid("wood"): 0.6, _gid("tar"): 0.4}, rust=False, units=5),
+    dict(id="lamp_oil", name="Олія для ліхтаря (фляга)", cat="Спорядження й побут", base_mm=500, weights={_gid("oil"): 0.6, _gid("whales"): 0.4}, rust=False, units=1),
+    dict(id="rope_50", name="Мотузка конопляна (50 фт)", cat="Спорядження й побут", base_mm=1000, weights={_gid("ropes"): 0.7, _gid("hemp"): 0.3}, rust=False, units=1),
+    dict(id="artisan_tools", name="Набір ремісничих інструментів", cat="Спорядження й побут", base_mm=50000, weights={_gid("tools"): 0.8, _gid("iron"): 0.2}, rust=True, units=1),
+    dict(id="travel_clothes", name="Дорожній одяг і плащ", cat="Спорядження й побут", base_mm=15000, weights={_gid("garments"): 0.6, _gid("boots"): 0.4}, rust=False, units=1),
     # Зброя та обладунки
-    dict(id="spear_dagger", name="Спис або кинджал", cat="Зброя та обладунки", base_mm=10000, weights={59: 0.7, 1: 0.3}, rust=True),
-    dict(id="longsword", name="Довгий меч / бойова сокира", cat="Зброя та обладунки", base_mm=120000, weights={59: 0.7, 4: 0.3}, rust=True),
-    dict(id="longbow", name="Довгий лук і сагайдак (20 стріл)", cat="Зброя та обладунки", base_mm=180000, weights={1: 0.5, 59: 0.5}, rust=False),
-    dict(id="leather_armor", name="Шкіряний обладунок", cat="Зброя та обладунки", base_mm=80000, weights={43: 0.8, 45: 0.2}, rust=False),
-    dict(id="chain_mail", name="Кольчуга", cat="Зброя та обладунки", base_mm=550000, weights={59: 0.6, 4: 0.4}, rust=True),
-    dict(id="plate_armor", name="Повний латний обладунок", cat="Зброя та обладунки", base_mm=4500000, weights={59: 0.7, 4: 0.3}, rust=True),
+    dict(id="spear_dagger", name="Спис або кинджал", cat="Зброя та обладунки", base_mm=10000, weights={_gid("arms"): 0.7, _gid("wood"): 0.3}, rust=True, units=1),
+    dict(id="longsword", name="Довгий меч / бойова сокира", cat="Зброя та обладунки", base_mm=120000, weights={_gid("arms"): 0.7, _gid("iron"): 0.3}, rust=True, units=1),
+    dict(id="longbow", name="Довгий лук і сагайдак (20 стріл)", cat="Зброя та обладунки", base_mm=180000, weights={_gid("wood"): 0.5, _gid("arms"): 0.5}, rust=False, units=1),
+    dict(id="leather_armor", name="Шкіряний обладунок", cat="Зброя та обладунки", base_mm=80000, weights={_gid("leather"): 0.8, _gid("garments"): 0.2}, rust=False, units=1),
+    dict(id="chain_mail", name="Кольчуга", cat="Зброя та обладунки", base_mm=550000, weights={_gid("arms"): 0.6, _gid("iron"): 0.4}, rust=True, units=1),
+    dict(id="plate_armor", name="Повний латний обладунок", cat="Зброя та обладунки", base_mm=4500000, weights={_gid("arms"): 0.7, _gid("iron"): 0.3}, rust=True, units=1),
     # Транспорт і тварини
-    dict(id="draft_horse", name="Тягловий кінь", cat="Транспорт і тварини", base_mm=250000, weights={18: 1.0}, rust=False),
-    dict(id="warhorse", name="Бойовий / верховий кінь", cat="Транспорт і тварини", base_mm=650000, weights={18: 0.8, 55: 0.2}, rust=False),
-    dict(id="wagon", name="Віз із упряжжю", cat="Транспорт і тварини", base_mm=150000, weights={1: 0.6, 55: 0.4}, rust=False),
-    dict(id="ship_ticket", name="Квиток на корабель (за 100 км)", cat="Транспорт і тварини", base_mm=10000, weights={53: 0.6, 52: 0.4}, rust=False),
+    dict(id="draft_horse", name="Тягловий кінь", cat="Транспорт і тварини", base_mm=250000, weights={_gid("horses"): 1.0}, rust=False, units=1),
+    dict(id="warhorse", name="Бойовий / верховий кінь", cat="Транспорт і тварини", base_mm=650000, weights={_gid("horses"): 0.8, _gid("harnesses"): 0.2}, rust=False, units=1),
+    dict(id="wagon", name="Віз із упряжжю", cat="Транспорт і тварини", base_mm=150000, weights={_gid("wood"): 0.6, _gid("harnesses"): 0.4}, rust=False, units=1),
+    dict(id="ship_ticket", name="Квиток на корабель (за 100 км)", cat="Транспорт і тварини", base_mm=10000, weights={_gid("ships"): 0.6, _gid("sails"): 0.4}, rust=False, units=1),
     # Послуги та магія
-    dict(id="healing_potion", name="Зілля лікування (мале)", cat="Послуги та магія", base_mm=350000, weights={25: 0.4, 68: 0.3, 47: 0.3}, rust=False),
-    dict(id="spell_scroll_1", name="Сувій закляття 1-го кола", cat="Послуги та магія", base_mm=250000, weights={49: 0.4, 50: 0.4, 51: 0.2}, rust=False),
-    dict(id="guard_hire", name="Найм охоронця / провідника (доба)", cat="Послуги та магія", base_mm=10000, weights={9: 0.5, 59: 0.5}, rust=False),
-    dict(id="forge_repair", name="Ремонт зброї чи обладунку в кузні", cat="Послуги та магія", base_mm=15000, weights={58: 0.6, 34: 0.4}, rust=True),
+    dict(id="healing_potion", name="Зілля лікування (мале)", cat="Послуги та магія", base_mm=350000, weights={_gid("incense"): 0.4, _gid("liquor"): 0.3, _gid("glass"): 0.3}, rust=False, units=1),
+    dict(id="spell_scroll_1", name="Сувій закляття 1-го кола", cat="Послуги та магія", base_mm=250000, weights={_gid("paper"): 0.4, _gid("ink"): 0.4, _gid("books"): 0.2}, rust=False, units=1),
+    dict(id="guard_hire", name="Найм охоронця / провідника (доба)", cat="Послуги та магія", base_mm=10000, weights={_gid("grain"): 0.5, _gid("arms"): 0.5}, rust=False, units=1),
+    dict(id="forge_repair", name="Ремонт зброї чи обладунку в кузні", cat="Послуги та магія", base_mm=15000, weights={_gid("tools"): 0.6, _gid("coal"): 0.4}, rust=True, units=1),
 ]
 
 MODES = {
@@ -59,8 +99,17 @@ MODES = {
 }
 
 
+def _value_to_mm():
+    """Курс збереження з безпечним запасним значенням для старих lore-модулів."""
+    try:
+        v = float(LD.VALUE_TO_MM)
+    except (AttributeError, TypeError, ValueError):
+        v = 10000.0
+    return v if math.isfinite(v) and v > 0 else 10000.0
+
+
 def fmt_mm(mm: float) -> str:
-    """Форматує роздрібну вартість у монетах за курсом 1:100 (до 2 старших номіналів)."""
+    """Форматує роздрібну вартість у монетах; дрібні номінали не губити."""
     val = int(round(mm))
     if val <= 0:
         return "0 мм"
@@ -69,12 +118,33 @@ def fmt_mm(mm: float) -> str:
         q, val = divmod(val, size)
         if q:
             parts.append(f"{q} {name}")
-    return " ".join(parts[:2])
+    return " ".join(parts) if parts else "0 мм"
+
+
+def _km_factor(sim):
+    """Переводить одиниці відстані метаданих у кілометри."""
+    try:
+        unit = str((((sim.w.get("meta") or {}).get("units") or {}).get("distance") or {}).get("unit", "km") or "km").strip().lower()
+    except AttributeError:
+        unit = "km"
+    return 1.609344 if unit in ("mi", "mile", "miles") else 1.0
 
 
 def _dist_km(sim, a, b):
-    scale = float(sim.w.get("meta", {}).get("units", {}).get("distance", {}).get("scale", 3.0) or 3.0)
-    return math.hypot(a["x"] - b["x"], a["y"] - b["y"]) * scale
+    try:
+        scale = float((((sim.w.get("meta") or {}).get("units") or {}).get("distance") or {}).get("scale", 3.0) or 3.0)
+    except (TypeError, ValueError):
+        scale = 3.0
+    return math.hypot(a["x"] - b["x"], a["y"] - b["y"]) * scale * _km_factor(sim)
+
+
+def _edge_km(sim, edge):
+    """Відстань ребра ринкової мережі в км (з урахуванням одиниць метаданих)."""
+    try:
+        d = float(edge.get("dist", 0.0))
+    except (TypeError, ValueError):
+        d = 0.0
+    return max(d, 1.0) * _km_factor(sim)
 
 
 def _has_black_rust(sim, sid, st_uk):
@@ -103,6 +173,7 @@ def city_retail_prices(sim, burg_id):
     is_cap = bool(b.get("capital"))
     tax_rate = st.get("sales_tax", 0.04) * max(st.get("tax_mult", 1.0), 0.5)
 
+    reserved = m.get("shop_reserved") or {}
     items = []
     for item in RETAIL_CATALOG:
         raw_ratio = 0.0
@@ -133,10 +204,32 @@ def city_retail_prices(sim, burg_id):
             status = "Надлишок"
         else:
             status = "В наявності"
+        # Реальна доступність рахується від ефективного запасу: сирий запас
+        # мінус уже зарезервований під інші пропозиції. Резерв ніколи не
+        # витрачається самою купівлею (див. purchase_shop_item).
+        need_units = max(float(item.get("units", 1) or 1), 1e-9)
+        wsum = sum(item["weights"].values()) or 1.0
+        stock = {}
+        per_unit = {}
+        for g in item["weights"]:
+            try:
+                raw_stock = float(m.get("stock", {}).get(g, 0.0))
+                raw_reserved = float(reserved.get(g, 0.0))
+            except (TypeError, ValueError):
+                raw_stock, raw_reserved = 0.0, 0.0
+            eff = max(0.0, raw_stock - raw_reserved)
+            stock[g] = eff
+            per_unit[g] = max(need_units * (float(item["weights"][g]) / wsum), 1e-9)
+        ratios = [stock[g] / per_unit[g] for g in stock]
+        # Невеликий epsilon захищає від втрати однієї одиниці через float-шум.
+        available = max(0, int(math.floor(min(ratios) + 1e-9))) if ratios else 0
+        if available <= 0:
+            status = "Немає в наявності"
         items.append(dict(
             id=item["id"], name=item["name"], cat=item["cat"],
             base_mm=item["base_mm"], base_coins=fmt_mm(item["base_mm"]),
             mm=mm, coins=fmt_mm(mm), pct=pct, status=status,
+            available=available, units=need_units, stock={str(g): round(v, 1) for g, v in stock.items()},
         ))
 
     return dict(
@@ -152,6 +245,53 @@ def city_retail_prices(sim, burg_id):
         categories=list(RETAIL_CATEGORIES),
         items=items,
     )
+
+
+def purchase_shop_item(sim, burg_id, item_id, qty=1):
+    """Списує придбаний D&D-предмет із ринкового запасу й повертає квитанцію."""
+    bid = int(burg_id)
+    if bid not in sim.burgs:
+        raise KeyError(f"Місто {burg_id} не знайдено")
+    try:
+        q = float(qty)
+        if not math.isfinite(q):
+            raise ValueError("quantity must be finite")
+        count = int(max(1.0, min(99.0, q)))
+    except (TypeError, ValueError, OverflowError):
+        count = 1
+    retail = city_retail_prices(sim, bid)
+    item = next((it for it in retail["items"] if it["id"] == str(item_id)), None)
+    if item is None:
+        return dict(ok=False, reason="Товар не знайдено у каталозі")
+    if item["available"] < count:
+        return dict(ok=False, reason=f"На ринку є лише {item['available']} шт.", available=item["available"])
+    catalog = next((x for x in RETAIL_CATALOG if x["id"] == item["id"]), None)
+    if catalog is None:
+        return dict(ok=False, reason="Товар не знайдено у каталозі")
+    m = sim.markets[sim.burgs[bid]["market"]]
+    stock = m.setdefault("stock", {})
+    # shop_reserved лише читаємо в city_retail_prices: продаж не має зменшувати
+    # резерв, бо тоді резервовані товари ніколи не зникають з пропозиції.
+    wsum = sum(catalog["weights"].values()) or 1.0
+    for g, wt in catalog["weights"].items():
+        take = count * float(catalog.get("units", 1) or 1) * (wt / wsum)
+        try:
+            before = float(stock.get(g, 0.0))
+        except (TypeError, ValueError):
+            before = 0.0
+        stock[g] = max(0.0, before - take)
+    mm_cost = item["mm"] * count
+    value_cost = mm_cost / _value_to_mm()
+    # Позабалансовий роздріб: виручка йде лише до капіталу ринку (крамниці).
+    # Казна не отримує окремої частки з тієї самої суми — інакше гроші
+    # подвоюються. Податок уже закладений у роздрібну ціну (tax_rate).
+    m["capital"] = float(m.get("capital", 0.0) or 0.0) + max(0.0, value_cost * 0.5)
+    sim.log("gm", f"Купівля в {retail['burg_uk']}: {item['name']} ×{count} на {fmt_mm(mm_cost)}.")
+    # Доступність перераховуємо за ефективним запасом, а не за збереженим
+    # значенням з попереднього розрахунку.
+    fresh = next((it for it in city_retail_prices(sim, bid)["items"] if it["id"] == item["id"]), None)
+    return dict(ok=True, item=item["name"], qty=count, mm=mm_cost, coins=fmt_mm(mm_cost),
+                available=fresh["available"] if fresh else max(0, item["available"] - count))
 
 
 def travel_route(sim, from_burg_id, to_burg_id, mode="foot"):
@@ -200,7 +340,7 @@ def travel_route(sim, from_burg_id, to_burg_id, mode="foot"):
 
     # Ринкова мережа
     for e in sim.edges:
-        dist_km = max(float(e["dist"]), 1.0)
+        dist_km = _edge_km(sim, e)
         _add_edge(("m", e["a"]), ("m", e["b"]), dist_km, bool(e["sea"]))
 
     # Пряме ребро між містами поруч на одній суші
@@ -359,44 +499,52 @@ def travel_route(sim, from_burg_id, to_burg_id, mode="foot"):
     else:
         d_level = "Безпечно"
 
-    # Зустрічі для D&D-сесії
-    encounters = []
+    # Небезпека тепер має вагу: повільніший і дорожчий шлях, а не лише текст.
+    risk_days = total_days * (1.0 + danger / 400.0)
+    cost_mm = int(round(cost_mm * (1.0 + danger / 200.0)))
+
+    # Зустрічі для D&D-сесії. Рівень небезпеки визначає, які саме три
+    # зустрічі потраплять у підбірку — високий ризик витискає «тихі» варіанти.
+    encounter_pool = []
     if war_states:
-        encounters.append("Військовий роз'їзд або загін дезертирів вимагає документи чи мито на переправі.")
+        encounter_pool.append("Військовий роз'їзд або загін дезертирів вимагає документи чи мито на переправі.")
     if has_sea:
-        encounters.append("Піратська шхуна чи морський змій переслідує судно на відкритій ділянці маршруту.")
+        encounter_pool.append("Піратська шхуна чи морський змій переслідує судно на відкритій ділянці маршруту.")
     if any("нежит" in h.lower() or "монстр" in h.lower() or "дракон" in h.lower() for h in hazards):
-        encounters.append("Засідка потвор або нежиті біля покинутої застави / руїн уздовж шляху.")
+        encounter_pool.append("Засідка потвор або нежиті біля покинутої застави / руїн уздовж шляху.")
     if any("епідем" in h.lower() for h in hazards):
-        encounters.append("Карантинний кордон вартових і натовп біженців перед міською брамою.")
-    if has_land and len(encounters) < 3:
-        encounters.append("Зламаний купецький віз перекрив шлях; купці просять охорону до найближчого ринку.")
-    if cold_max > 0.35 and len(encounters) < 3:
-        encounters.append("Раптова хуртовина або зграя голодних вовків змушує шукати прихисток у заїзді.")
+        encounter_pool.append("Карантинний кордон вартових і натовп біженців перед міською брамою.")
+    if has_land:
+        encounter_pool.append("Зламаний купецький віз перекрив шлях; купці просять охорону до найближчого ринку.")
+    if cold_max > 0.35:
+        encounter_pool.append("Раптова хуртовина або зграя голодних вовків змушує шукати прихисток у заїзді.")
     fallbacks = [
         "Мандрівний трубадур або вісник гільдії ділиться свіжими чутками про ціни та інтриги сусідів.",
         "Дорожні розбійники влаштували хибний завал на тракті й очікують плату за проїзд.",
         "Загадковий караван алхіміків шукає провідника в обмін на знижку на зілля.",
     ]
     for fb in fallbacks:
-        if len(encounters) >= 3:
-            break
-        if fb not in encounters:
-            encounters.append(fb)
+        if fb not in encounter_pool:
+            encounter_pool.append(fb)
+    rotation = (danger // 20) % len(encounter_pool)
+    encounters = [encounter_pool[(rotation + i) % len(encounter_pool)] for i in range(3)]
 
     return dict(
         from_id=b1_id, from_uk=b1["uk"], to_id=b2_id, to_uk=b2["uk"],
         mode=mode, mode_name=mc["name"],
-        total_km=round(total_km, 1), total_days=round(total_days, 1),
+        total_km=round(total_km, 1), total_days=round(risk_days, 1),
         cost_mm=cost_mm, cost_coins=fmt_mm(cost_mm),
         danger_score=danger, danger_level=d_level,
-        legs=legs, hazards=hazards, encounters=encounters[:3], points=points,
+        legs=legs, hazards=hazards, encounters=encounters, points=points,
     )
 
 
-def generate_quest_hooks(sim, state_id=None, limit=10):
+def generate_quest_hooks(sim, state_id=None, limit=10, include_claimed=False, include_accepted=False):
     """Генерує пригодницькі квести й чутки для партії з поточних подій, війн, епідемій і дефіцитів."""
-    sid_filter = int(state_id) if state_id not in (None, "", "all") else None
+    try:
+        sid_filter = int(state_id) if state_id not in (None, "", "all") else None
+    except (TypeError, ValueError, OverflowError):
+        sid_filter = None
     state_name_filter = sim.sname(sid_filter) if sid_filter is not None and sid_filter in sim.states else None
     t = sim.tick_index()
     hooks = []
@@ -568,7 +716,7 @@ def generate_quest_hooks(sim, state_id=None, limit=10):
             patron="Місцевий торговий дім",
             reward=f"{int(round(ratio * 25))} зм + % від прибутку",
             urgency=f"Ціна {int(ratio * 100)}%",
-            text=f"Гострий дефіцит ресурсу «{g_uk}» на ринку {sim.markets[mid]['uk']} ({fmt_mm(p * LD.VALUE_TO_MM)} за {sim.goods[g]['unit']}). Торговці щедро платять за безпечний супровід партії.",
+            text=f"Гострий дефіцит ресурсу «{g_uk}» на ринку {sim.markets[mid]['uk']} ({fmt_mm(p * _value_to_mm())} за {sim.goods[g]['unit']}). Торговці щедро платять за безпечний супровід партії.",
         ))
 
     if not hooks:
@@ -582,4 +730,208 @@ def generate_quest_hooks(sim, state_id=None, limit=10):
             urgency="Звичайна",
             text="Ситуація у світі відносно спокійна; гільдія пропонує оплачувану охорону кур'єра між сусідніми ринками.",
         ))
+
+    # Прийняті квести більше не підміняються як свіжі пропозиції — дошка
+    # активних справ доступна окремо. Повернути їх можна явним прагцем.
+    board = sim.w.get("quests") or {}
+    if not isinstance(board, dict):
+        board = {}
+    if include_accepted and isinstance(board.get("active"), list):
+        for q in board["active"]:
+            if not isinstance(q, dict):
+                continue
+            if sid_filter is not None and q.get("state_uk") not in (state_name_filter, "Світ"):
+                continue
+            hooks.insert(0, dict(q, accepted=True))
+
+    for h in hooks:
+        sig = "|".join(str(h.get(k, "")) for k in ("title", "category", "location", "patron"))
+        h.setdefault("id", "q-" + hashlib.sha1(sig.encode("utf-8")).hexdigest()[:10])
+
+    if not include_claimed:
+        claimed = set()
+        for key in ("claimed", "active", "completed", "expired"):
+            for q in (board.get(key) or []):
+                claimed.add(str(q.get("id")) if isinstance(q, dict) else str(q))
+        hooks = [h for h in hooks if str(h.get("id")) not in claimed]
     return hooks[:limit]
+
+
+def _quest_due(q, fallback):
+    """Безпечно читає due_tick: бите/нечислове значення не ламає expiry."""
+    try:
+        v = q.get("due_tick", fallback) if isinstance(q, dict) else fallback
+        if v is None or isinstance(v, bool):
+            return fallback
+        return int(v)
+    except (TypeError, ValueError, OverflowError):
+        return fallback
+
+
+def _due_offset(hook):
+    """Термін виконання залежить від терміновості/ступеня квесту."""
+    urg = str((hook or {}).get("urgency") or "").lower()
+    m = re.search(r"\d+", urg)
+    sev = int(m.group(0)) if m else 0
+    span = max(6, 20 - 2 * sev) if sev else 18
+    if any(k in urg for k in ("терміново", "висока", "облога", "окупація")):
+        span = min(span, 12)
+    elif "звичайна" in urg:
+        span = max(span, 20)
+    return max(3, min(60, span))
+
+
+def _quest_store(sim):
+    board = sim.w.get("quests")
+    if not isinstance(board, dict):
+        board = {}
+        sim.w["quests"] = board
+    for key in ("active", "completed", "expired", "claimed"):
+        if not isinstance(board.get(key), list):
+            board[key] = []
+    try:
+        board["next_id"] = int(board.get("next_id", 1))
+    except (TypeError, ValueError, OverflowError):
+        board["next_id"] = 1
+    # Coerce due_tick once on load so every consumer sees a plain int.
+    fallback = sim.tick_index() + 18
+    for q in board["active"]:
+        if isinstance(q, dict):
+            q["due_tick"] = _quest_due(q, fallback)
+    return board
+
+
+def _reward_zm(text):
+    """Парсить звичайні та групування суми: «120 зм», «1 200 зм», «1,200 зм»."""
+    m = re.search(r"(\d+(?:[\s,\u00a0]\d+)*)\s*зм", str(text or ""), re.IGNORECASE)
+    if not m:
+        return 0
+    digits = re.sub(r"\D", "", m.group(1))
+    return int(digits) if digits else 0
+
+
+def _state_id_by_uk(sim, uk):
+    if uk in (None, "", "Світ", "Регіон"):
+        return None
+    for sid, st in sim.states.items():
+        if st.get("uk") == uk or st.get("name") == uk:
+            return sid
+    return None
+
+
+def accept_quest(sim, quest_id, state_id=None):
+    """Бере квест із дошки в роботу; нагорода ще не виплачується."""
+    board = _quest_store(sim)
+    raw_id = str(quest_id)
+    # Повторне прийняття будь-якого вже заявленого ID заборонено.
+    for key in ("active", "completed", "expired"):
+        for q in board[key]:
+            if not isinstance(q, dict):
+                continue
+            if str(q.get("id")) == raw_id or str(q.get("quest_id")) == raw_id:
+                return q if key == "active" else None
+    if raw_id in {str(x) for x in board["claimed"]}:
+        return None
+    hook = next((h for h in generate_quest_hooks(sim, state_id, limit=200)
+                 if str(h.get("id")) == raw_id), None)
+    if hook is None:
+        return None
+    qid = int(board["next_id"])
+    board["next_id"] = qid + 1
+    tick = sim.tick_index()
+    quest = dict(hook, quest_id=qid, accepted_tick=tick,
+                 due_tick=tick + _due_offset(hook), status="active")
+    board["active"].append(quest)
+    board["claimed"].append(str(hook["id"]))
+    sim.log("gm", f"Прийнято квест «{quest['title']}» (нагорода {quest.get('reward', '—')}).")
+    return quest
+
+
+def complete_quest(sim, quest_id, success=True):
+    """Завершує квест і списує/виплачує нагороду з казни відповідної держави."""
+    board = _quest_store(sim)
+    quest = next((q for q in board["active"] if isinstance(q, dict) and
+                  (str(q.get("id")) == str(quest_id) or str(q.get("quest_id")) == str(quest_id))), None)
+    if quest is None:
+        return None
+    board["active"].remove(quest)
+    sid = _state_id_by_uk(sim, quest.get("state_uk"))
+    reward_zm = max(0, _reward_zm(quest.get("reward")))
+    paid = 0.0
+    if success and sid:
+        try:
+            available = max(0.0, float(sim.states[sid].get("treasury", 0.0)))
+        except (TypeError, ValueError, OverflowError):
+            available = 0.0
+        paid = min(reward_zm, available)
+        sim.states[sid]["treasury"] = available - paid
+    note = ""
+    if not success:
+        note = "Нагороду не виплачено: квест провалено."
+    elif not sid:
+        note = "Нагороду не виплачено: державу-замовника не знайдено."
+    out = dict(quest, status="completed" if success else "failed",
+               completed_tick=sim.tick_index(), paid_zm=int(paid), payment_note=note)
+    board["completed"].append(out)
+    sim.log("gm", f"Квест «{quest['title']}»: {'успішно' if success else 'провал'}." +
+            (f" Виплачено {int(paid)} зм." if paid else " Нагороди не виплачено."))
+    return out
+
+
+def expire_quests(sim):
+    """Закриває прострочені квести; викликається ГМ або перед звітом."""
+    board = _quest_store(sim)
+    t = sim.tick_index()
+    expired = [q for q in board["active"] if isinstance(q, dict) and _quest_due(q, t + 1) <= t]
+    for q in expired:
+        board["active"].remove(q)
+        board["expired"].append(dict(q, status="expired", expired_tick=t))
+        sim.log("gm", f"Термін квесту «{q.get('title', q.get('id', '—'))}» минув.")
+    return len(expired)
+
+
+def generate_npc(sim, state_id=None, role=None):
+    """Генерує ім'я, риси та привід для NPC на основі лору й поточних подій."""
+    sid = None
+    if state_id not in (None, "", "all"):
+        try:
+            cand = int(state_id)
+        except (TypeError, ValueError, OverflowError):
+            cand = None
+        if cand in sim.states:
+            sid = cand
+    st = sim.states.get(sid) if sid is not None else None
+    culture = str((st or {}).get("culture") or "Generic")
+    syllable_table = getattr(LD, "CULTURE_SYLLABLES", {}) or {}
+    syllables = syllable_table.get(culture) or syllable_table.get("Generic")
+    role_txt = role if isinstance(role, str) else ("" if role is None else str(role))
+    role_txt = role_txt.strip()[:64]
+    npcs = sim.w.get("npcs")
+    if not isinstance(npcs, list):
+        npcs = []
+    # Кожен виклик у межах одного тіка має давати нового NPC.
+    seed = (sim.w.get("meta") or {}).get("sim_seed", 1)
+    rng = random.Random(f"{seed}-npc-{sim.tick_index()}-{sid}-{role_txt}-{len(npcs)}-{uuid.uuid4().hex[:8]}")
+    if isinstance(syllables, (list, tuple)) and len(syllables) >= 2 and syllables[0] and syllables[1]:
+        name = str(rng.choice(syllables[0])) + str(rng.choice(syllables[1]))
+    else:
+        name = "Мандрівник"
+    name = name.strip()[:64] or "Мандрівник"
+    roles = ["купець", "намісник", "лицар", "алхімік", "вісник", "розбійник", "жриця", "капітан"]
+    role_out = role_txt or rng.choice(roles)
+    traits = rng.sample(["дратливий", "завжди тримає слово", "борг гільдії", "таємний покровитель", "поранена рука",
+                         "любить ризик", "підозрілий до чужинців", "має вплив при дворі"], 2)
+    try:
+        hooks = generate_quest_hooks(sim, sid, limit=5)
+    except Exception:
+        hooks = []
+    hook = "Шукає роботу в найближчому місті"
+    if hooks:
+        picked = rng.choice(hooks)
+        hook = str((picked.get("title") if isinstance(picked, dict) else picked) or hook)[:160]
+    candidates = [g.get("name") for g in (sim.w.get("guilds") or []) if isinstance(g, dict)] or \
+                 [x.get("uk") for x in sim.states.values() if isinstance(x, dict)] or ["Місцева громада"]
+    candidates = [str(x).strip()[:80] for x in candidates if str(x or "").strip()]
+    faction = rng.choice(candidates) if candidates else "Місцева громада"
+    return dict(name=name, role=role_out, faction=faction, traits=traits, hook=hook,
+                location=sim.sname(sid) if sid is not None else "Світ")
