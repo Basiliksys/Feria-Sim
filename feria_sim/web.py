@@ -50,6 +50,10 @@ CONFIG_FIELDS = [
     ("neighbor_drift", "Дрейф до сусідів", -0.2, 0.2, 0.01),
     ("army_recovery_rate", "Відновлення армії", 0.0, 0.3, 0.005),
     ("trade_budget_factor", "Бюджет торгівлі", 0.0, 10.0, 0.1),
+    ("caravan_share", "Частка караванної торгівлі", 0.0, 1.0, 0.01),
+    ("caravan_max_active", "Макс. активних караванів", 0, 256, 1),
+    ("caravan_hub_count", "Кількість торгових хабів", 2, 12, 1),
+    ("specialty_rate", "Частота регіональних товарів", 0.0, 2.0, 0.1),
     ("guild_invest_rate", "Інвестиції гільдій", 0.0, 0.3, 0.005),
     ("per_capita.food", "Душова норма: їжа", 1.0, 40.0, 0.5),
     ("per_capita.utilities", "Душова норма: комунальне", 0.0, 20.0, 0.25),
@@ -61,6 +65,9 @@ CONFIG_BOOL_FIELDS = [
     ("demand_elasticity_enabled", "Еластичний попит"),
     ("dynamic_recipes", "Динамічні рецепти"),
     ("capital_constraint", "Обмеження капіталу"),
+    ("caravan_enabled", "Каравани за маршрутами"),
+    ("geography_enabled", "Шар географії на карті"),
+    ("special_goods_enabled", "Спецтовари (для нових світів)"),
 ]
 CONFIG_NUMERIC = {k for k, _, _, _, _ in CONFIG_FIELDS}
 CONFIG_BOOLS = {k for k, _ in CONFIG_BOOL_FIELDS}
@@ -291,6 +298,9 @@ class AppState:
         with self.lock:
             sim = self.sim
             w = sim.w
+            geo = getattr(sim, "geography", None) or {}
+            market_geo = geo.get("market_geo") or {}
+            geo_regions = geo.get("regions") or {}
             states_out = []
             for sid, st in sim.states.items():
                 s = RP.state_summary(sim, sid)
@@ -316,11 +326,16 @@ class AppState:
                     base = float(good.get("value", 0) or 0)
                     if base > 0:
                         ratios.append(float(m.get("price", {}).get(gid, base)) / base)
+                mg = market_geo.get(mid) or {}
+                region = geo_regions.get(mg.get("region")) or {}
                 markets_out.append(dict(
                     id=mid, uk=m["uk"], x=cb["x"], y=cb["y"], state=sid, state_uk=sim.sname(sid),
                     burgs=len(m["burgs"]), port=cb["port"],
                     food_idx=round(sim.price_index("food", sid), 2),
                     scarcity=round(max(ratios) if ratios else 1.0, 2),
+                    band=mg.get("band"), biome=mg.get("biome"), coast=bool(mg.get("coast")),
+                    river=bool(mg.get("river")), region=mg.get("region"),
+                    specialties=list(region.get("specialties") or []),
                 ))
             burgs_out = [dict(
                 id=b["id"], uk=b["uk"], name=b["name"], x=b["x"], y=b["y"], state=b["state"],
@@ -335,6 +350,39 @@ class AppState:
                 bx=sim.burgs[sim.markets[e["b"]]["center"]]["x"],
                 by=sim.burgs[sim.markets[e["b"]]["center"]]["y"],
             ) for e in sim.edges]
+            caravans_out = []
+            for c in w.get("caravans", []):
+                if not isinstance(c, dict):
+                    continue
+                mid = c.get("at_market")
+                cm = sim.markets.get(mid, {})
+                cb = sim.burgs.get(cm.get("center"), {})
+                gd = sim.goods.get(c.get("good"), {})
+                rt = next((r for r in w.get("trade_routes", [])
+                           if isinstance(r, dict) and r.get("id") == c.get("route_id")), {})
+                caravans_out.append(dict(
+                    id=c.get("id", ""), route_id=c.get("route_id", 0),
+                    route_name=rt.get("name", ""),
+                    good=c.get("good", ""), good_name=gd.get("name", c.get("good", "")),
+                    qty=round(_finite(c.get("qty")), 1),
+                    at_market=mid, at_uk=cm.get("uk", ""),
+                    dest_uk=sim.markets.get(c.get("dest"), {}).get("uk", ""),
+                    eta_days=c.get("eta_days", 0),
+                    x=cb.get("x") if cb else None, y=cb.get("y") if cb else None,
+                ))
+            routes_out = []
+            for r in w.get("trade_routes", []):
+                if not isinstance(r, dict):
+                    continue
+                pts = []
+                for mid in r.get("markets", []):
+                    cm = sim.markets.get(mid, {})
+                    cb = sim.burgs.get(cm.get("center"), {})
+                    pts.append(dict(x=cb.get("x", 0), y=cb.get("y", 0), uk=cm.get("uk", str(mid))))
+                routes_out.append(dict(
+                    id=r.get("id", 0), name=r.get("name", ""), points=pts,
+                    dist=r.get("dist", 0), sea=bool(r.get("sea")), cap=r.get("cap", 0),
+                ))
             wars_out = [dict(
                 id=wr["id"], name=wr["name"], score=round(wr["score"], 1),
                 since=f"{LD.MONTHS_UK[wr['start_month']-1][:3]} {wr['start_year']}",
@@ -381,6 +429,16 @@ class AppState:
                     loyalty=round(gov.get("loyalty", 70.0), 1),
                     specialty=pr.get("specialty", ""),
                 ))
+            specialty_ids = {gid for gid, gd in sim.goods.items() if gd.get("specialty")}
+            for r in geo_regions.values():
+                if isinstance(r, dict):
+                    specialty_ids.update(g for g in (r.get("specialties") or []) if g in sim.goods)
+            geo_payload = dict(
+                biomes=geo.get("biomes") or {}, features=geo.get("features") or {},
+                regions=geo_regions, market_geo=market_geo,
+                goods={gid: LD.good_uk(gid, sim.goods) for gid in sorted(specialty_ids)},
+                derived=bool(geo.get("derived")),
+            )
             undo_count, undo_label = self._undo_info()
             saved_maps = self._list_saved_maps()
             source_file = w["meta"].get("source_file", "")
@@ -411,6 +469,12 @@ class AppState:
                 history=w["history"]["world"][-240:],
                 history_states=w["history"]["states"][-240:],
                 states=states_out, provinces=provinces_out, markets=markets_out, burgs=burgs_out, edges=edges_out,
+                geography=geo_payload,
+                config_flags=dict(
+                    geography_enabled=bool(w.get("config", {}).get("geography_enabled", True)),
+                    special_goods_enabled=bool(w.get("config", {}).get("special_goods_enabled", True)),
+                ),
+                caravans=caravans_out, trade_routes=routes_out,
                 wars=wars_out, active_events=events_active, epidemics=epidemics,
                 markers=markers, crusade=crusade_out, event_defs=event_defs,
                 journal=w["journal"][-60:][::-1],
@@ -536,8 +600,17 @@ class AppState:
                 o = e["b"] if e["a"] == mid else e["a"]
                 routes.append(dict(id=o, uk=sim.markets[o]["uk"], dist=e["dist"], sea=e["sea"],
                                    flow=round(e.get("flow", 0.0), 1)))
+            geo = getattr(sim, "geography", None) or {}
+            mg = (geo.get("market_geo") or {}).get(mid) or {}
+            region = (geo.get("regions") or {}).get(mg.get("region")) or {}
             return dict(id=mid, uk=m["uk"], state=sid, state_uk=sim.sname(sid),
-                        burgs=len(m["burgs"]), routes=routes, goods=goods)
+                        burgs=len(m["burgs"]), routes=routes, goods=goods,
+                        geography=dict(band=mg.get("band"), biome=mg.get("biome"),
+                                       coast=bool(mg.get("coast")), river=bool(mg.get("river")),
+                                       region=region.get("name", ""),
+                                       specialties=[LD.good_uk(g, sim.goods)
+                                                    for g in (region.get("specialties") or [])
+                                                    if g in sim.goods]))
 
     def goods_table(self):
         with self.lock:
@@ -550,7 +623,9 @@ class AppState:
                 tot_want = sum(m.get("want", {}).get(g, 0.0) for m in sim.markets.values())
                 rows.append(dict(
                     id=g, name=LD.good_uk(g, sim.goods), unit=sim.goods[g]["unit"], base=sim.goods[g]["value"],
-                    tags=sim.goods[g]["tags"], min_p=round(pts[0][0], 2), avg_p=round(avg, 2),
+                    tags=sim.goods[g]["tags"], specialty=bool(sim.goods[g].get("specialty")),
+                    base_good=sim.goods[g].get("base"),
+                    min_p=round(pts[0][0], 2), avg_p=round(avg, 2),
                     max_p=round(pts[-1][0], 2), cheap_at=pts[0][1], cheap_id=pts[0][2],
                     exp_at=pts[-1][1], exp_id=pts[-1][2],
                     stock=round(tot_stock, 1), want=round(tot_want, 1),

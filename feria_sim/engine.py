@@ -38,6 +38,15 @@ CONFIG_DEFAULTS = {
     "mil_goods_per_head": 0.002,
     "event_rate": 1.0,
     "war_rate": 1.0,
+    # каравани за готовими магістралями з карти
+    "caravan_enabled": True,
+    "caravan_share": 0.35,
+    "caravan_max_active": 64,
+    "caravan_hub_count": 5,
+    # регіональна географія та спеціалізовані товари
+    "geography_enabled": True,
+    "special_goods_enabled": True,
+    "specialty_rate": 1.0,
     # існуючі ключі (фолбек для старих/неповних збережень)
     "per_capita": {"food": 10.0, "utilities": 4.0, "construction": 1.5, "luxury": 0.8},
     "craft_scale": 1.0,
@@ -119,6 +128,37 @@ def _finite(value, default=0.0):
     return v if math.isfinite(v) else default
 
 
+def _as_int(value, default=0):
+    """Безпечне приведення до int (рядки типу 'x' дають default)."""
+    return int(_finite(value, default))
+
+
+def _normalize_caravan(c, goods, markets):
+    """Приводить караван зі старого/пошкодженого сейву до безпечного вигляду."""
+    if not isinstance(c, dict):
+        return None
+    g, dest = c.get("good"), _as_int(c.get("dest"), -1)
+    if g not in goods or dest not in markets:
+        return None
+    out = dict(c)
+    out["good"] = g
+    out["dest"] = dest
+    out["route_id"] = _as_int(c.get("route_id"), 0)
+    out["qty"] = max(0.0, _finite(c.get("qty"), 0.0))
+    out["leg_index"] = max(-1, _as_int(c.get("leg_index"), -1))
+    out["next_edge"] = _as_int(c.get("next_edge"), -1)
+    out["unit_price"] = max(0.0, _finite(c.get("unit_price"), 0.0))
+    out["margin"] = _finite(c.get("margin"), 0.0)
+    out["eta_days"] = max(0.0, _finite(c.get("eta_days"), 0.0))
+    out["created_tick"] = _as_int(c.get("created_tick"), 0)
+    out["id"] = str(c.get("id", ""))
+    for key in ("at_market", "origin", "origin_market"):
+        if key in out:
+            out[key] = _as_int(out[key], -1)
+    out["origin_state"] = _as_int(c.get("origin_state"), -1) if c.get("origin_state") is not None else None
+    return out
+
+
 def season(month, lat):
     """(множник врожайності, холод 0..1) для місяця 1..12 на широті lat."""
     m = month if lat >= 0 else (month + 5) % 12 + 1
@@ -166,6 +206,13 @@ class Sim:
         self.states = w["states"]
         self.provinces = w.setdefault("provinces", {})
         self.edges = w["edges"]
+        from . import geography as GT, routes as RT
+        self.geography = GT.ensure_geography(w)
+        self.routes_by_id = RT.ensure_highways(self)
+        cars = w.get("caravans")
+        raw_cars = cars if isinstance(cars, list) else []
+        self.caravans = [c for c in (_normalize_caravan(x, self.goods, self.markets) for x in raw_cars) if c is not None]
+        w["caravans"] = self.caravans
         self._ensure_provinces()
         # Нормалізація недовірених/старих даних: жоден товар чи значення не має
         # вибити симуляцію (KeyError / NaN / inf).
@@ -611,15 +658,28 @@ class Sim:
         rate = max(0.0, _finite(cfg.get("transport_rate"), 0.012))
         capital_on = bool(self.cfg("capital_constraint", True))
         budget_factor = float(self.cfg("trade_budget_factor", 2.0))
+        caravan_share = clamp(_finite(self.cfg("caravan_share"), 0.35), 0.0, 1.0)
         # тимчасові (несеріалізовані) лічильники поточного місяця
         self.imported_this_tick = collections.defaultdict(set)
         self.trade_spent = collections.defaultdict(float)
+        # Каравани йдуть готовими магістралями; попарна торгівля нижче —
+        # лише «остання миля» й послаблена на маршрутних ребрах.
+        self._step_caravans()
+        self._dispatch_caravans(rng)
+        self.route_edges = set()
+        for r in self.w.get("trade_routes", []):
+            if isinstance(r, dict):
+                self.route_edges.update(int(x) for x in (r.get("edges") or []) if isinstance(x, int))
         for ei, e in enumerate(self.edges):
+            if e.get("a") not in self.markets or e.get("b") not in self.markets:
+                continue
             ma, mb = self.markets[e["a"]], self.markets[e["b"]]
             sa, sb = self.market_state[e["a"]], self.market_state[e["b"]]
             tmult = self.mm("edge", ei, "trade") * self.mm("market", e["a"], "trade") * self.mm("market", e["b"], "trade")
             if e["sea"]:
                 tmult *= self.mm("edge", ei, "piracy")
+            if ei in self.route_edges:
+                tmult *= caravan_share
             tariff = 0.0
             if sa != sb:
                 f = self.trade_friction(sa, sb)
@@ -652,13 +712,17 @@ class Sim:
                         margin = pd * (1 - eff_tariff) - ps - cost
                         if margin <= 0:
                             continue
-                        avail = ms["stock"].get(g, 0.0)
+                        avail = max(0.0, _finite(ms["stock"].get(g, 0.0), 0.0))
                         if avail <= 0.5:
                             continue
                         # попит у кінці маршруту обмежує потік
                         dem = md.get("want", {}).get(g, 0.0)
                         room = max(dem * 2.5 - md["stock"].get(g, 0.0), dem * 0.3)
-                        qty = min(avail * 0.28, room if dem > 0 else avail * 0.05) * clamp(margin / max(ps, 0.01), 0.05, 1.0) * tmult
+                        # Модифікатори торгівлі (бум, контрабанда, ...) можуть давати
+                        # tmult > 1. Стеля 3.0 разом із лімітом 28% лишає обсяг
+                        # у межах реального запасу: 0.28 * 3 = 0.84 < 1.
+                        flow_mult = clamp(tmult, 0.0, 3.0)
+                        qty = min(avail * 0.28, room if dem > 0 else avail * 0.05) * clamp(margin / max(ps, 0.01), 0.05, 1.0) * flow_mult
                         if capital_on:
                             budget = max(50.0, float(ms.get("capital", 0.0)) * budget_factor)
                             qty = min(qty, (budget - self.trade_spent[src]) / max(ps, 0.01))
@@ -666,7 +730,7 @@ class Sim:
                             continue
                         # велика відстань не може з'їсти більше чверті вантажу
                         loss = clamp(0.01 + (0.02 if "food" in gd["tags"] else 0.0) * (dist / 300.0), 0.0, 0.25)
-                        ms["stock"][g] -= qty
+                        ms["stock"][g] = max(0.0, avail - qty)
                         md["stock"][g] = md["stock"].get(g, 0.0) + qty * (1 - loss)
                         val = qty * ps
                         prof = qty * margin
@@ -683,6 +747,220 @@ class Sim:
                         key = (sa, sb) if src == e["a"] else (sb, sa)
                         self.acc["trade_edge"][key] += val
             e["flow"] = round(0.7 * _finite(e.get("flow"), 0.0) + 0.3 * moved_edge, 2)
+
+    # ------------------------------------------------------------------ каравани
+    def _caravan_hazard(self, ei, sea):
+        trade_m = clamp(_finite(self.mm("edge", ei, "trade"), 1.0), 0.1, 2.0)
+        hazard = 1.0 / trade_m
+        if sea:
+            pir = clamp(_finite(self.mm("edge", ei, "piracy"), 1.0), 0.1, 2.0)
+            hazard *= 1.0 / pir
+        return clamp(hazard, 0.5, 6.0)
+
+    def _caravan_loss(self, ei, good, sea):
+        e = self.edges[ei]
+        dist = max(0.0, _finite(e.get("dist"), 0.0))
+        tags = good.get("tags", []) if isinstance(good, dict) else []
+        loss = 0.01 + (0.02 if "food" in tags else 0.0) * (dist / 300.0)
+        if sea:
+            loss += 0.015
+        return clamp(loss * self._caravan_hazard(ei, sea), 0.0, 0.8)
+
+    def _drop_caravan(self, caravan):
+        self.caravans = [c for c in self.caravans if c is not caravan]
+        self.w["caravans"] = self.caravans
+
+    def _deliver_caravan(self, caravan):
+        mid, g = caravan.get("dest"), caravan.get("good")
+        if mid not in self.markets or g not in self.goods:
+            self._drop_caravan(caravan)
+            return
+        qty = max(0.0, _finite(caravan.get("qty"), 0.0))
+        if qty <= 0.05:
+            self._drop_caravan(caravan)
+            return
+        m = self.markets[mid]
+        m["stock"][g] = m["stock"].get(g, 0.0) + qty
+        self.imported_this_tick[mid].add(g)
+        self.log("trade", f"Караван прибув у {m['uk']}: {self.goods[g].get('name', g)} ×{qty:.1f}.")
+        sd = self.market_state[mid]
+        val = qty * _finite(caravan.get("unit_price"), 0.0)
+        prof = qty * _finite(caravan.get("margin"), 0.0)
+        self.acc["trade_val"][sd] += val
+        self.acc["import_val"][sd] += val
+        od = caravan.get("origin_state")
+        if od is not None:
+            self.acc["export_val"][od] += val
+            self.acc["trade_edge"][(od, sd)] += val
+        if self.cfg("capital_constraint", True):
+            om = caravan.get("origin_market")
+            if om in self.markets:
+                self.markets[om]["capital"] = max(0.0, float(self.markets[om].get("capital", 0.0)) + prof * 0.5)
+            m["capital"] = float(m.get("capital", 0.0)) + prof * 0.5
+        self._drop_caravan(caravan)
+
+    def _dump_caravan(self, caravan, mid):
+        """Війна/ембарго перекрили шлях — вантаж продається на поточному ринку."""
+        g, qty = caravan.get("good"), max(0.0, _finite(caravan.get("qty"), 0.0))
+        if mid in self.markets and g in self.goods and qty > 0.0:
+            m = self.markets[mid]
+            m["stock"][g] = m["stock"].get(g, 0.0) + qty
+            self.imported_this_tick[mid].add(g)
+        om = caravan.get("origin_market")
+        if self.cfg("capital_constraint", True) and om in self.markets:
+            loss = max(0.0, _finite(caravan.get("unit_price"), 0.0)) * qty * 0.5
+            self.markets[om]["capital"] = max(0.0, float(self.markets[om].get("capital", 0.0)) - loss)
+        self._drop_caravan(caravan)
+
+    def _dump_caravan_safe(self, caravan, fallback=None):
+        """Повертає вантаж на поточний/початковий ринок, якщо маршрут зламано."""
+        mid = _as_int(caravan.get("at_market"), -1)
+        if mid not in self.markets:
+            mid = _as_int(caravan.get("origin_market"), -1)
+        if mid not in self.markets:
+            mid = fallback
+        if mid in self.markets:
+            self._dump_caravan(caravan, mid)
+        else:
+            self._drop_caravan(caravan)
+
+    def _step_caravans(self):
+        active = []
+        cap_active = int(clamp(_finite(self.cfg("caravan_max_active", 64), 64), 0, 256))
+        for c in list(self.caravans):
+            if not isinstance(c, dict):
+                continue
+            rid = _as_int(c.get("route_id"), 0)
+            route = self.routes_by_id.get(rid)
+            if route is None:
+                self._dump_caravan_safe(c)
+                continue
+            legs, mids = route.get("edges") or [], route.get("markets") or []
+            nxt = int(_finite(c.get("leg_index", -1), -1)) + 1
+            if nxt < 0 or nxt >= len(legs) or nxt + 1 >= len(mids):
+                self._dump_caravan_safe(c, mids[-1] if mids else None)
+                continue
+            ei = _as_int(legs[nxt], -1)
+            if ei < 0 or ei >= len(self.edges):
+                self._dump_caravan_safe(c, mids[nxt] if nxt < len(mids) else None)
+                continue
+            e = self.edges[ei]
+            cur_mid, dst_mid = mids[nxt], mids[nxt + 1]
+            if cur_mid == e["a"] and dst_mid == e["b"]:
+                sd, dd = self.market_state[e["a"]], self.market_state[e["b"]]
+            elif cur_mid == e["b"] and dst_mid == e["a"]:
+                sd, dd = self.market_state[e["b"]], self.market_state[e["a"]]
+            else:
+                sd = dd = self.market_state.get(cur_mid)
+            friction = self.trade_friction(sd, dd) if sd != dd else 0.0
+            if friction is None:
+                self._dump_caravan(c, cur_mid)
+                continue
+            tariff = clamp(friction * self.state_mult(dd, "tariff_mod", 1.0), 0.0, 0.6) if sd != dd else 0.0
+            qty = max(0.0, _finite(c.get("qty"), 0.0))
+            qty *= 1.0 - self._caravan_loss(ei, self.goods.get(c.get("good")), bool(e.get("sea")))
+            c["qty"] = qty
+            c["leg_index"] = nxt
+            c["at_market"] = dst_mid
+            c["next_edge"] = _as_int(legs[nxt + 1], -1) if nxt + 1 < len(legs) else -1
+            if qty <= 0.05:
+                self._dump_caravan_safe(c, dst_mid)
+                continue
+            unit = _finite(c.get("unit_price"), 0.0)
+            if tariff > 0.0 and sd != dd:
+                self.acc["tariff"][dd] += qty * unit * tariff * 0.6
+            self.acc["trade_edge"][(sd, dd)] += qty * unit
+            if nxt == len(legs) - 1:
+                self._deliver_caravan(c)
+            else:
+                active.append(c)
+        self.caravans = active[:cap_active]
+        self.w["caravans"] = self.caravans
+
+    def _dispatch_caravans(self, rng):
+        if not self.cfg("caravan_enabled", True):
+            return
+        share = clamp(_finite(self.cfg("caravan_share"), 0.35), 0.0, 1.0)
+        if share <= 0.0:
+            return
+        cap_active = int(clamp(_finite(self.cfg("caravan_max_active", 64), 64), 0, 256))
+        rate = max(0.0, _finite(self.cfg("transport_rate"), 0.012))
+        capital_on = bool(self.cfg("capital_constraint", True))
+        budget_factor = float(self.cfg("trade_budget_factor", 2.0))
+        t = self.tick_index()
+        for route in self.w.get("trade_routes", []):
+            if len(self.caravans) >= cap_active:
+                break
+            if not isinstance(route, dict):
+                continue
+            mids, legs = route.get("markets") or [], route.get("edges") or []
+            if len(mids) < 2 or not legs:
+                continue
+            rid = _as_int(route.get("id"), 0)
+            if any(_as_int(c.get("route_id"), 0) == rid for c in self.caravans):
+                continue
+            dist = max(0.0, _finite(route.get("dist"), 0.0))
+            seaf = 0.6 if route.get("sea") else 1.0
+            for a_mid, b_mid in ((mids[0], mids[-1]), (mids[-1], mids[0])):
+                if a_mid not in self.markets or b_mid not in self.markets:
+                    continue
+                sa, sb = self.market_state[a_mid], self.market_state[b_mid]
+                fr = 0.0 if sa == sb else self.trade_friction(sa, sb)
+                if fr is None:
+                    continue
+                tariff = clamp(fr * self.state_mult(sb, "tariff_mod", 1.0), 0.0, 0.6) if sa != sb else 0.0
+                ms, md = self.markets[a_mid], self.markets[b_mid]
+                best = None
+                for g, ps in ms.get("price", {}).items():
+                    if g in self.imported_this_tick[a_mid] or g not in self.goods:
+                        continue
+                    pd = md.get("price", {}).get(g)
+                    if pd is None:
+                        continue
+                    gd = self.goods[g]
+                    bulk = 1.0
+                    for tg in gd.get("tags", ()):
+                        bulk *= LD.BULKY_TAGS.get(tg, 1.0)
+                    bulk = clamp(bulk, 0.1, 3.0)
+                    cost = math.sqrt(max(_finite(gd.get("value"), 0.5), 0.5)) * rate * (dist / 100.0) * bulk * seaf
+                    margin = pd * (1.0 - tariff) - ps - cost
+                    if margin <= 0.1:
+                        continue
+                    avail = _finite(ms.get("stock", {}).get(g), 0.0)
+                    if avail <= 1.0:
+                        continue
+                    dem = _finite(md.get("want", {}).get(g), 0.0)
+                    room = max(dem * 3.0 - _finite(md.get("stock", {}).get(g), 0.0), 0.0)
+                    if dem > 0.0 and room <= 0.0:
+                        continue
+                    qty = min(avail * clamp(0.3 * share * 2.0, 0.05, 0.5), room if dem > 0 else avail * 0.05)
+                    qty *= clamp(margin / max(ps, 0.01), 0.05, 1.0)
+                    if capital_on:
+                        budget = max(50.0, _finite(ms.get("capital"), 0.0) * budget_factor)
+                        qty = min(qty, max(0.0, (budget - self.trade_spent[a_mid]) / max(ps, 0.01)))
+                    if qty <= 0.5:
+                        continue
+                    score = margin * qty
+                    if best is None or score > best[0]:
+                        best = (score, g, qty, ps, margin)
+                if best is None:
+                    continue
+                _, g, qty, ps, margin = best
+                ms["stock"][g] = max(0.0, _finite(ms.get("stock", {}).get(g), 0.0) - qty)
+                val = qty * ps
+                self.trade_spent[a_mid] += val
+                if capital_on:
+                    ms["capital"] = max(0.0, _finite(ms.get("capital"), 0.0) - val)
+                self.caravans.append(dict(
+                    id=f"c{t}-{rid}-{a_mid}-{b_mid}",
+                    route_id=rid, good=g, qty=round(qty, 3), leg_index=-1,
+                    at_market=a_mid, origin=a_mid, dest=b_mid,
+                    origin_market=a_mid, origin_state=sa,
+                    unit_price=ps, margin=margin,
+                    eta_days=round(dist / 28.0, 1), created_tick=t,
+                    next_edge=_as_int(legs[0], -1) if legs else -1,
+                ))
+                break
 
     def trade_friction(self, a, b):
         """Мито між державами або None, якщо торгівля заборонена (війна/ембарго)."""
@@ -767,7 +1045,7 @@ class Sim:
                             if take_cover <= 0:
                                 continue
                             qty = take_cover / cv
-                            stock[g] = avail - qty
+                            stock[g] = max(0.0, avail - qty)
                             want[g] = want.get(g, 0.0) + qty
                             remaining -= take_cover
                             got += take_cover

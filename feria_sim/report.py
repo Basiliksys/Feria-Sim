@@ -220,6 +220,18 @@ def province_text(sim, pid):
     gov = pr.get("governor") or {}
     traits = ", ".join(LD.GOVERNOR_TRAITS.get(t, {}).get("label", t) for t in gov.get("traits", []))
     p_burgs = sorted((sim.burgs[b] for b in pr.get("burgs", []) if b in sim.burgs), key=lambda x: -x["pop"])
+    geo = getattr(sim, "geography", None) or {}
+    reg = (geo.get("regions") or {}).get(pid) or {}
+    reg_specialties = ", ".join(LD.good_uk(g, sim.goods) for g in (reg.get("specialties") or [])
+                                if g in sim.goods)
+    center_geo = (geo.get("market_geo") or {}).get(sim.burgs.get(pr.get("burg"), {}).get("market")) or {}
+    geo_line = f"Географія: {reg.get('band', '—')}" + (f", біом {reg['biome']}" if reg.get("biome") is not None else "")
+    if reg.get("coast"):
+        geo_line += ", узбережжя"
+    if reg.get("river"):
+        geo_line += ", річка"
+    if center_geo.get("lat") is not None:
+        geo_line += f"; широта {center_geo['lat']}°"
     pop_tot = sum(b["pop"] + b["rural"] for b in p_burgs)
     status = f"Окупована ({sim.sname(occ)})" if occ else (f"В облозі ({pr.get('siege', 0):.0f}%)" if pr.get("siege", 0) > 0 else ("Корінна земля" if core == sid else f"Анексована (корінна: {sim.sname(core)})"))
     lines = [
@@ -228,6 +240,8 @@ def province_text(sim, pid):
         f"Намісник: {gov.get('name', '—')}" + (f", {gov['age']} р." if gov.get("age") else "") + f"; риси: {traits}; лояльність: {gov.get('loyalty', 70):.0f}%",
         f"Герб: {pr.get('blazon', '—')}",
         f"Економічний профіль: {pr.get('specialty', '—')}",
+        geo_line,
+        f"Регіональні товари: {reg_specialties or '—'}",
         f"Лор: {pr.get('lore', '—')}",
         "Міста провінції: " + ", ".join(f"{b['uk']} ({fmt_n(b['pop'] + b['rural'])})" for b in p_burgs[:10]),
     ]
@@ -612,6 +626,32 @@ def write_quests(sim, vault, hdr, used=None):
 def write_route_notes(sim, vault, hdr, used=None):
     top = sorted(sim.burgs.values(), key=lambda b: -(_num(b.get("pop")) + _num(b.get("rural"))))[:8]
     L = [hdr, "# Маршрути та небезпека\n\nОцінка шляхів між найбільшими містами для планування D&D-сесії.\n"]
+    highways = [r for r in (sim.w.get("trade_routes") or []) if isinstance(r, dict)]
+    if highways:
+        L.append("## Готові караванні магістралі\n")
+        L.append("| Маршрут | Ринків | Відстань | Море | Провідність |")
+        L.append("|---|---|---:|---|---:|")
+        geo = getattr(sim, "geography", None) or {}
+        mgeo = geo.get("market_geo") or {}
+        regions = geo.get("regions") or {}
+        spec_lines = []
+        for r in highways[:32]:
+            mids = r.get("markets") or []
+            names = [sim.markets.get(m, {}).get("uk", str(m)) for m in mids]
+            L.append(f"| {md_escape(r.get('name', '—'))} | {len(names)} | {_num(r.get('dist')):.0f} | "
+                     f"{'так' if r.get('sea') else 'ні'} | {_num(r.get('cap')):.1f} |")
+            found = set()
+            for mid in mids:
+                region = regions.get((mgeo.get(mid) or {}).get("region")) or {}
+                found.update(g for g in (region.get("specialties") or []) if g in sim.goods)
+            if found:
+                spec_lines.append(f"- **{md_escape(r.get('name', '—'))}**: " +
+                                  md_escape(", ".join(LD.good_uk(g, sim.goods) for g in sorted(found))))
+        L.append("")
+        if spec_lines:
+            L.append("### Спеціалізації вздовж магістралей\n")
+            L.extend(spec_lines)
+            L.append("")
     L.append("| Звідки | Куди | Режим | Км | Днів | Вартість | Небезпека | Зустрічі |")
     L.append("|---|---|---|---:|---:|---:|---|---|")
     for a in top:
@@ -663,13 +703,14 @@ def rules_text(sim, hdr):
 Крок = 1 місяць. Світ: {len(sim.states)} держав, {len(sim.burgs)} міст, {len(sim.markets)} ринків, {goods_n} товарів, {recipes_n} варіантів рецептів.
 
 1. **Виробництво.** Сировина за біомом/родовищем плюс ремесло міст. Рецепти обираються щомісяця за поточними цінами; збиткові цехи зупиняються. Сезонність за широтою.
-2. **Торгівля.** Купці везуть товар, якщо різниця цін перевищує перевезення й мито. Торгівля обмежена капіталом ринку; один товар не можна перепродати двічі в тому ж місяці.
+2. **Торгівля.** Частина вантажу йде караванами готовими магістралями карти (`trade_routes`): між столицями й найбільшими ринками, з транзитом і митом на кожній ділянці. Попарна торгівля лишається як «остання миля» й послаблена на маршрутних ребрах. Торгівля обмежена капіталом ринку; один товар не можна перепродати двічі в тому ж місяці.
 3. **Споживання.** Їжа, побут, будівництво, розкіш. Попит помірно реагує на ціну; нестача впливає на смертність і стабільність.
 4. **Ціни.** `ціна = база × (цільовий запас / запас)^0.5`, межі 0.3×…6× бази; згладжування 35%/міс.
 5. **Держави.** Податки, утримання армії, закупівля спорядження. Борг викликає жорстку економію; позики гільдій реально переказуються в казну.
 6. **Політика.** Відносини (-100…100), війни, облоги, анексії з поступовою асиміляцією; технології обмежені й повільно повертаються до бази.
 7. **Події.** {event_n} типів; частота масштабується розміром світу, кількість на місяць обмежена. Деякі події мають варіанти рішень для ГМ.
 8. **D&D інструменти.** Роздрібні ціни залежать від ринку, податків, війни й Іржі; маршрути мають реальну надбавку за небезпеку; квести можна приймати й закривати.
+9. **Географія й спецтовари.** Біом, широтний пояс, порт/річка й провінція з .map визначають регіональні specialty. Їх виробляють конверсією частини базової сировини зі збереженням вартості; далі вони беруть участь у торгівлі, цінах і караванах на загальних підставах.
 
 **Налаштування:** event_rate={md_escape(cfg.get('event_rate', 1))}, war_rate={md_escape(cfg.get('war_rate', 1))}, carry_cap={md_escape(cfg.get('carry_cap', 1.65))}, tech_cap={md_escape(cfg.get('tech_cap', 3.0))}.
 **Монети:** 1 од. = 1 зм = 100 см = 10 000 мм.

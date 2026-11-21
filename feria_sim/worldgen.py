@@ -11,7 +11,7 @@ import os
 import random
 import re
 
-from . import lore_data as LD
+from . import geography as GT, lore_data as LD
 from . import engine as E
 
 # Канонічні значення конфігурації живуть в engine.CONFIG_DEFAULTS, щоб Sim міг
@@ -138,6 +138,9 @@ def _resolve_overrides(overrides, world_name, is_feria):
 CONTENT_PACK_PATH = os.path.join(
     os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "data", "content_pack.json"
 )
+SPECIAL_GOODS_PATH = os.path.join(
+    os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "data", "special_goods.json"
+)
 
 # Дозволені ключі config з діапазонами (невідомі ключі ігноруються).
 _CONTENT_CONFIG_RANGES = {
@@ -156,6 +159,10 @@ _CONTENT_CONFIG_RANGES = {
     "war_rate": (0.0, 100.0),
     "craft_scale": (0.0, 100.0),
     "transport_rate": (0.0, 10.0),
+    "caravan_share": (0.0, 1.0),
+    "caravan_max_active": (0, 256),
+    "caravan_hub_count": (2, 12),
+    "specialty_rate": (0.0, 2.0),
     "birth": (0.0, 1.0),
     "death": (0.0, 1.0),
     "poll_k": (0.0, 1000.0),
@@ -163,6 +170,7 @@ _CONTENT_CONFIG_RANGES = {
 }
 _CONTENT_CONFIG_BOOLS = frozenset((
     "event_scale_by_size", "demand_elasticity_enabled", "dynamic_recipes", "capital_constraint",
+    "caravan_enabled", "geography_enabled", "special_goods_enabled",
 ))
 _CONTENT_GOOD_KEYS = frozenset((
     "value", "cover", "recipes", "name", "unit", "tags", "chance", "biomeOutput", "multipliers",
@@ -328,6 +336,129 @@ def _apply_content_pack(w):
             gd.update(upd)
 
 
+def _load_special_goods():
+    """Читає каталог регіональних товарів; недовірені дані відсіюються нижче."""
+    if not os.path.isfile(SPECIAL_GOODS_PATH):
+        return []
+    try:
+        with open(SPECIAL_GOODS_PATH, encoding="utf-8") as f:
+            data = json.load(f)
+    except (OSError, ValueError, TypeError):
+        return []
+    if not isinstance(data, dict):
+        return []
+    items = data.get("goods")
+    return items if isinstance(items, list) else []
+
+
+def _special_origin_match(origin, mg):
+    """Перевіряє регіональні умови; для старих сейвів біом може бути None."""
+    if not isinstance(origin, dict):
+        return True
+    bands = origin.get("bands")
+    if isinstance(bands, (list, tuple)) and bands and mg.get("band") not in bands:
+        return False
+    biomes = origin.get("biomes")
+    if isinstance(biomes, (list, tuple)) and biomes:
+        b = mg.get("biome")
+        if b is not None and b not in biomes:
+            return False
+    if origin.get("coast") and not mg.get("coast"):
+        return False
+    if origin.get("river") and not mg.get("river"):
+        return False
+    return True
+
+
+def _apply_special_goods(w):
+    """Додає спецтовари й частково конвертує базову сировину в кожному місті."""
+    cfg = w.get("config") if isinstance(w.get("config"), dict) else {}
+    if not bool(cfg.get("special_goods_enabled", True)):
+        return
+    rate = _finite(cfg.get("specialty_rate", 1.0), 1.0, 0.0, 2.0)
+    if rate <= 0.0:
+        return
+    goods = w.get("goods")
+    burgs = w.get("burgs")
+    if not isinstance(goods, dict) or not isinstance(burgs, dict):
+        return
+    geo = GT.ensure_geography(w)
+    mgeo = geo.get("market_geo") or {}
+    regions = geo.get("regions") or {}
+    seed = str((w.get("meta") or {}).get("seed", "1"))
+
+    for spec in _load_special_goods():
+        if not isinstance(spec, dict):
+            continue
+        try:
+            gid = int(_finite(spec.get("id"), -1, 100, 100000))
+            base = int(_finite(spec.get("base"), -1, 1, 100000))
+        except (TypeError, ValueError, OverflowError):
+            continue
+        if gid < 100 or gid in goods or base not in goods:
+            continue
+        vm = _finite(spec.get("value_mult"), 1.0, 1.0, 5.0)
+        div = _finite(spec.get("divert"), 0.0, 0.0, 0.9)
+        rarity = _finite(spec.get("rarity"), 0.0, 0.0, 1.0)
+        if vm <= 0.0 or div <= 0.0 or rarity <= 0.0:
+            continue
+        base_value = _finite(goods[base].get("value"), 1.0, 1e-9, 1e9)
+        tags = spec.get("tags")
+        tags = [str(t) for t in tags] if isinstance(tags, (list, tuple)) else []
+        if "specialty" not in tags:
+            tags.append("specialty")
+        # Корисність specialty має дорівнювати корисності витісненої сировини:
+        # q_spec = q_base / value_mult, отже cover = base_cover * value_mult.
+        # Каталог cover лишається документацією; фактичне значення беремо з базового товару.
+        base_cover = goods[base].get("cover") if isinstance(goods[base].get("cover"), dict) else {}
+        cover = {}
+        for cat, amount in base_cover.items():
+            if cat in LD.CATEGORIES:
+                cv = _finite(amount, 0.0, 0.0, 10.0)
+                if cv > 0.0:
+                    cover[cat] = min(10.0, cv * vm)
+        origin = spec.get("origin") if isinstance(spec.get("origin"), dict) else {}
+        goods[gid] = dict(
+            id=gid,
+            name=str(spec.get("name") or LD.good_uk(gid))[:120],
+            value=min(1e9, max(1e-9, base_value * vm)),
+            tags=tags,
+            unit=str(spec.get("unit", ""))[:40],
+            cover=cover,
+            recipes=[],
+            chance=0.0,
+            biome_out={},
+            cult_mult={},
+            base=base,
+            specialty=True,
+            value_mult=vm,
+            origin=origin,
+        )
+        for bid, b in burgs.items():
+            mid = b.get("market")
+            mg = mgeo.get(mid)
+            if not isinstance(mg, dict) or not _special_origin_match(origin, mg):
+                continue
+            raw = b.get("raw") if isinstance(b.get("raw"), dict) else {}
+            avail = _finite(raw.get(base), 0.0, 0.0, 1e12)
+            if avail <= 0.0:
+                continue
+            chance = min(1.0, rarity * rate)
+            if random.Random("%s:%d:%s" % (seed, gid, bid)).random() > chance:
+                continue
+            q = avail * min(0.9, div * min(rate, 1.5))
+            if q <= 0.0:
+                continue
+            raw[base] = max(0.0, avail - q)
+            raw[gid] = _finite(raw.get(gid), 0.0, 0.0, 1e12) + q / vm
+            b["raw"] = raw
+            for bucket in (mg, regions.get(mg.get("region"))):
+                if isinstance(bucket, dict):
+                    got = bucket.setdefault("specialties", [])
+                    if gid not in got:
+                        got.append(gid)
+
+
 def _make_province_lore(w, p, p_burgs):
     goods = w["goods"]
     raw_tot = {}
@@ -379,6 +510,7 @@ def build_world(imp, seed=1, overrides=None, start_year=None, era=None):
         event_rate=1.0, war_rate=1.0,
     ))
     _apply_content_pack(w)
+    _apply_special_goods(w)
     cultures = w["cultures"]
     start_year = int(_finite(start_year, LD.START_YEAR, -100000, 100000))
     era = LD.ERA_SHORT if era is None else era

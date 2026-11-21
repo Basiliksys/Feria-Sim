@@ -782,9 +782,17 @@ def h_tech(sim, rng, s, sev, dur):
 def h_caravan(sim, rng, ei, sev, dur):
     e = sim.edges[ei]
     sim.add_mod("edge", ei, "trade", 0.4, dur, "caravan")
+    # Каравани, що вже в дорозі на цій ділянці, втрачають частину вантажу одразу.
+    lost = 0
+    for c in getattr(sim, "caravans", []) or []:
+        if not isinstance(c, dict) or int(c.get("next_edge", -1)) != int(ei):
+            continue
+        c["qty"] = max(0.0, float(c.get("qty", 0.0) or 0.0) * 0.5)
+        lost += 1
     a, b = sim.markets[e["a"]], sim.markets[e["b"]]
+    extra = f" Постраждало караванів: {lost}." if lost else ""
     _record(sim, "caravan_lost", "edge", f"{a['uk']}–{b['uk']}", sev, dur,
-            f"Пограбовано великий караван між {a['uk']} та {b['uk']}.", [sim.market_state[e["a"]], sim.market_state[e["b"]]])
+            f"Пограбовано великий караван між {a['uk']} та {b['uk']}.{extra}", [sim.market_state[e["a"]], sim.market_state[e["b"]]])
 
 
 def h_succession(sim, rng, s, sev, dur):

@@ -19,7 +19,7 @@ import urllib.request
 import zlib
 from unittest import mock
 
-from feria_sim import cli, dnd_tools as DT, engine as E, events as EV, importer as IM, lore_data as LD, politics as PO, report as RP, web, worldgen as WG
+from feria_sim import cli, dnd_tools as DT, engine as E, events as EV, geography as GEO, importer as IM, lore_data as LD, politics as PO, report as RP, routes as RT, web, worldgen as WG
 
 
 def _sample_vanilla_map_lines(with_svg=True):
@@ -755,6 +755,40 @@ class TestFeriaSim(unittest.TestCase):
             for f1, f2 in zip(flows1, flows2):
                 self.assertAlmostEqual(f1, f2, places=2)
 
+    def test_trade_multiplier_cap_keeps_stock_non_negative(self):
+        """Регресія: бум торгівлі (tmult > 1) не може продати більше, ніж є на складі."""
+        with tempfile.TemporaryDirectory() as td:
+            _, _, _, _, sim = _build_calibrated_test_world(td, seed=3)
+            sim.w["mods"] = []
+            sim.w["trade_routes"] = []
+            sim.w["caravans"] = []
+            sim.caravans = []
+            sim.w["config"]["caravan_enabled"] = False
+            sim.w["config"]["capital_constraint"] = False
+            sim._index_mods()
+            edge = next(e for e in sim.edges
+                        if e.get("a") in sim.markets and e.get("b") in sim.markets and not e.get("sea"))
+            src, dst = sim.markets[edge["a"]], sim.markets[edge["b"]]
+            g = next(iter(sim.goods))
+            base = sim.goods[g]["value"]
+            for m in sim.markets.values():
+                m["stock"] = {k: 0.0 for k in sim.goods}
+            src["stock"][g] = 10.0
+            src["price"][g] = base
+            dst["price"][g] = base * 3.0
+            dst["want"][g] = 10000.0
+            # 2.5 * 2.5 = 6.25: без стелі tmult старий код списав би 17.5 з 10.
+            sim.add_mod("market", edge["a"], "trade", 2.5, 1, "test_boom")
+            sim.add_mod("market", edge["b"], "trade", 2.5, 1, "test_boom")
+            sim._index_mods()
+            sim.trade(random.Random(1))
+            self.assertLessEqual(src["stock"][g], 10.0)
+            self.assertGreaterEqual(src["stock"][g], 0.0)
+            self.assertGreater(dst["stock"][g], 0.0)
+            for mid, m in sim.markets.items():
+                for gid, q in m["stock"].items():
+                    self.assertGreaterEqual(q, -1e-9, msg=f"market {mid} good {gid}")
+
     def test_provinces_governors_and_territorial_war(self):
         with tempfile.TemporaryDirectory() as td:
             # 1) Автостворення провінцій для карти без provinces_raw + перевірка відсутності втрачених міст
@@ -1041,6 +1075,204 @@ class TestFeriaSim(unittest.TestCase):
                 self.assertTrue(expr.startswith("jsArg(") and expr.endswith(")"), attr)
         self.assertIn("D&D", html)
         self.assertIn("/api/map_geo", html)
+
+    def test_caravan_highways_and_delivery(self):
+        """Каравани існують як об'єкти маршруту, рухаються й розвантажуються."""
+        with tempfile.TemporaryDirectory() as td:
+            _, _, _, _, sim = _build_calibrated_test_world(td, seed=11)
+            routes = sim.w.get("trade_routes") or []
+            self.assertGreater(len(routes), 0, "магістралі не згенеровано з карти")
+            self.assertLessEqual(len(routes), 24)
+            seen_ids = set()
+            for r in routes:
+                self.assertNotIn(r["id"], seen_ids)
+                seen_ids.add(r["id"])
+                legs, mids = r["edges"], r["markets"]
+                self.assertGreaterEqual(len(legs), 1)
+                self.assertEqual(len(mids), len(legs) + 1)
+                self.assertEqual(len(set(legs)), len(legs))
+                for ei in legs:
+                    self.assertGreaterEqual(ei, 0)
+                    self.assertLess(ei, len(sim.edges))
+                for mid in mids:
+                    self.assertIn(mid, sim.markets)
+                self.assertIsNotNone(RT.shortest_path(sim, mids[0], mids[-1]))
+
+            saw_caravan = False
+            for _ in range(24):
+                sim.tick(events=False)
+                saw_caravan = saw_caravan or bool(sim.caravans)
+                for c in sim.caravans:
+                    self.assertGreater(c["qty"], 0.0)
+                    self.assertTrue(math.isfinite(c["qty"]))
+                    self.assertIn(c["good"], sim.goods)
+            self.assertTrue(saw_caravan, "жодного каравана не вирушило")
+            arrivals = [r for r in sim.w["journal"] if str(r.get("text", "")).startswith("Караван прибув")]
+            self.assertGreater(len(arrivals), 0, "жоден караван не дійшов до призначення")
+            for m in sim.markets.values():
+                for price in m["price"].values():
+                    self.assertTrue(math.isfinite(price))
+
+    def test_caravan_config_and_legacy_save(self):
+        """Старі сейви без маршрутів відновлюються; вимкнення караванів нічого не ламає."""
+        with tempfile.TemporaryDirectory() as td:
+            _, _, _, _, sim = _build_calibrated_test_world(td, seed=12)
+            w = sim.w
+            w.pop("trade_routes", None)
+            w["caravans"] = []
+            fresh = E.Sim(w, seed=12)
+            self.assertGreater(len(fresh.w["trade_routes"]), 0)
+            self.assertEqual(fresh.caravans, [])
+            fresh.w["config"]["caravan_enabled"] = False
+            for _ in range(6):
+                fresh.tick(events=False)
+            self.assertEqual(fresh.caravans, [], "каравани створюються попри caravan_enabled=false")
+
+    def test_geography_registry(self):
+        """Географія з .map компактна, покриває ринки й провінції."""
+        with tempfile.TemporaryDirectory() as td:
+            _, _, _, _, sim = _build_calibrated_test_world(td, seed=13)
+            geo = sim.w["geography"]
+            self.assertTrue(geo["derived"])
+            self.assertEqual(len(sim.goods), 83, "71 базовий товар + 12 регіональних")
+            self.assertNotIn("c_biome", sim.w)
+            self.assertNotIn("c_market", sim.w)
+            self.assertEqual(set(geo["market_geo"]), set(sim.markets))
+            self.assertEqual(set(geo["regions"]), set(sim.provinces))
+            for mid, mg in geo["market_geo"].items():
+                self.assertIn(mg["band"], GEO.BANDS)
+                self.assertTrue(math.isfinite(mg["lat"]))
+                self.assertIn(mg["coast"], (True, False))
+                self.assertIn(mg["river"], (True, False))
+            for rid, r in geo["regions"].items():
+                self.assertTrue(all(mid in sim.markets for mid in r["markets"]))
+                self.assertTrue(all(g in sim.goods for g in r["signature"]))
+                self.assertTrue(all(g in sim.goods for g in r["specialties"]))
+            self.assertGreater(sum(1 for mg in geo["market_geo"].values() if mg["biome"] is not None), 0)
+
+    def test_geography_legacy_save(self):
+        """Старий сейв без географії добудовуємо з meta/burgs і зберігаємо."""
+        with tempfile.TemporaryDirectory() as td:
+            _, _, _, _, sim = _build_calibrated_test_world(td, seed=14)
+            w = sim.w
+            w.pop("geography", None)
+            fresh = E.Sim(w, seed=14)
+            self.assertFalse(fresh.geography["derived"])
+            self.assertEqual(set(fresh.geography["market_geo"]), set(fresh.markets))
+            for mg in fresh.geography["market_geo"].values():
+                self.assertIn(mg["band"], GEO.BANDS)
+            path = os.path.join(td, "geo_world.json")
+            E.save_world(fresh.w, path)
+            loaded = E.Sim(E.load_world(path), seed=14)
+            self.assertEqual(len(loaded.geography["market_geo"]), len(loaded.markets))
+            loaded.tick(events=False)
+
+    def test_special_goods_catalog_and_conversion(self):
+        """Спецтовари конвертують сировину без друку вартості й працюють у симуляції."""
+        with tempfile.TemporaryDirectory() as td:
+            mpath = os.path.join(td, "spec.map")
+            with open(mpath, "w", encoding="utf-8") as f:
+                f.write(_sample_vanilla_map_lines(with_svg=True))
+            imp = IM.import_map(mpath)
+            self.assertEqual(len(imp["goods"]), 71)
+            raw_before = {bid: dict(b.get("raw") or {}) for bid, b in imp["burgs"].items()}
+            w = WG.build_world(imp, seed=13, start_year=1250, era="Н.Е.")
+            special = {gid: gd for gid, gd in w["goods"].items() if gd.get("specialty")}
+            self.assertEqual(len(w["goods"]), 83)
+            self.assertEqual(set(special), set(range(101, 113)))
+            for gid, gd in special.items():
+                self.assertIn("specialty", gd["tags"])
+                self.assertIn(gd["base"], w["goods"])
+                self.assertAlmostEqual(gd["value"],
+                                       w["goods"][gd["base"]]["value"] * gd["value_mult"], places=6)
+                base_cover = w["goods"][gd["base"]]["cover"]
+                if any(v > 0 for v in base_cover.values()):
+                    self.assertTrue(any(v > 0 for v in gd["cover"].values()))
+                for cat, cv in gd["cover"].items():
+                    expected = w["goods"][gd["base"]]["cover"].get(cat, 0.0) * gd["value_mult"]
+                    self.assertAlmostEqual(cv, expected, places=6, msg=f"{gid}:{cat}")
+            converted = False
+            for gid, gd in special.items():
+                lost = 0.0
+                for bid, b in w["burgs"].items():
+                    lost += max(0.0, raw_before[bid].get(gd["base"], 0.0)
+                                - b.get("raw", {}).get(gd["base"], 0.0))
+                made = sum(b.get("raw", {}).get(gid, 0.0) for b in w["burgs"].values())
+                if made > 0:
+                    converted = True
+                    self.assertAlmostEqual(made * gd["value_mult"], lost, places=4)
+            self.assertTrue(converted, "жодного спецтовару не вироблено")
+            region_specs = [r for r in w["geography"]["regions"].values() if r["specialties"]]
+            self.assertGreater(len(region_specs), 0)
+            for r in region_specs:
+                self.assertTrue(all(g in w["goods"] for g in r["specialties"]))
+
+            sim = E.Sim(E._intkeys(json.loads(json.dumps(w))), seed=13)
+            WG.calibrate(sim, log=lambda *_: None, warm_iters=3, months_per=1)
+            for _ in range(6):
+                sim.tick(events=False)
+            for m in sim.markets.values():
+                for g in special:
+                    self.assertGreaterEqual(m["stock"].get(g, 0.0), 0.0)
+                    self.assertTrue(math.isfinite(m["price"].get(g, 0.0)))
+
+    def test_special_goods_can_be_disabled(self):
+        """Вимкнення спецтоварів не змінює базовий каталог і сировину."""
+        with tempfile.TemporaryDirectory() as td:
+            mpath = os.path.join(td, "nospec.map")
+            with open(mpath, "w", encoding="utf-8") as f:
+                f.write(_sample_vanilla_map_lines(with_svg=True))
+            w = IM.import_map(mpath)
+            raw_before = {bid: dict(b.get("raw") or {}) for bid, b in w["burgs"].items()}
+            w["config"] = {"special_goods_enabled": False, "specialty_rate": 1.0}
+            WG._apply_special_goods(w)
+            self.assertEqual(len(w["goods"]), 71)
+            self.assertEqual(raw_before, {bid: b.get("raw") for bid, b in w["burgs"].items()})
+            for r in w["geography"]["regions"].values():
+                self.assertEqual(r["specialties"], [])
+
+    def test_corrupted_geography_is_rebuilt(self):
+        """Пошкоджений шар географії не ламає завантаження й збереження."""
+        with tempfile.TemporaryDirectory() as td:
+            _, _, _, _, sim = _build_calibrated_test_world(td, seed=16)
+            w = sim.w
+            w["geography"] = {"market_geo": {"broken": {"lat": float("nan")}}, "regions": {}}
+            fresh = E.Sim(w, seed=16)
+            self.assertEqual(set(fresh.geography["market_geo"]), set(fresh.markets))
+            self.assertTrue(all(isinstance(mid, int) for mid in fresh.geography["market_geo"]))
+            self.assertTrue(all(math.isfinite(mg["lat"]) for mg in fresh.geography["market_geo"].values()))
+            path = os.path.join(td, "rebuilt.json")
+            E.save_world(fresh.w, path)
+            E.Sim(E.load_world(path), seed=16).tick(events=False)
+
+    def test_web_exposes_geography_and_specialties(self):
+        """Overview/goods/market API віддає географію й спецтовари без помилок."""
+        with tempfile.TemporaryDirectory() as td:
+            _, wpath, jpath, _, _ = _build_calibrated_test_world(td, seed=17)
+            app = web.AppState(wpath, jpath)
+            ov = app.overview()
+            self.assertIn("geography", ov)
+            self.assertEqual(set(ov["geography"]),
+                             {"biomes", "features", "regions", "market_geo", "goods", "derived"})
+            self.assertTrue(ov["config_flags"]["geography_enabled"])
+            self.assertTrue(ov["config_flags"]["special_goods_enabled"])
+            self.assertGreater(len(ov["geography"]["goods"]), 0)
+            local_mids = [m["id"] for m in ov["markets"] if m["specialties"]]
+            self.assertGreater(len(local_mids), 0)
+            for m in ov["markets"]:
+                self.assertIn(m["band"], GEO.BANDS)
+            rows = app.goods_table()["goods"]
+            special_rows = [r for r in rows if r["specialty"]]
+            self.assertEqual(len(special_rows), len(ov["geography"]["goods"]))
+            detail = app.market_detail(local_mids[0])
+            self.assertTrue(detail["geography"]["specialties"])
+            self.assertTrue(all(s in ov["geography"]["goods"].values()
+                                for s in detail["geography"]["specialties"]))
+            cfg = app.config_data()
+            keys = {f["key"] for f in cfg["fields"]}
+            self.assertIn("specialty_rate", keys)
+            self.assertIn("geography_enabled", keys)
+            self.assertIn("special_goods_enabled", keys)
 
 
 if __name__ == "__main__":

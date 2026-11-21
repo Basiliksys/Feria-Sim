@@ -1,0 +1,150 @@
+{
+  "version": 2,
+  "note": "Регіональні товари. cover = cover(base) * value_mult, щоб конверсія зберігала і вартість, і корисність.",
+  "goods": [
+    {
+      "id": 101,
+      "name": "Лісовий мед",
+      "base": 15,
+      "value_mult": 1.5,
+      "cover": {"food": 0.75},
+      "tags": ["food", "specialty"],
+      "unit": "",
+      "origin": {"bands": ["temperate", "cold"], "biomes": [6]},
+      "rarity": 0.5,
+      "divert": 0.25
+    },
+    {
+      "id": 102,
+      "name": "Степовий сир",
+      "base": 10,
+      "value_mult": 1.4,
+      "cover": {"food": 1.4},
+      "tags": ["food", "specialty"],
+      "unit": "",
+      "origin": {"bands": ["temperate", "cold"]},
+      "rarity": 0.4,
+      "divert": 0.2
+    },
+    {
+      "id": 103,
+      "name": "Портова риба",
+      "base": 11,
+      "value_mult": 1.35,
+      "cover": {"food": 1.35},
+      "tags": ["food", "specialty"],
+      "unit": "",
+      "origin": {"coast": true},
+      "rarity": 0.6,
+      "divert": 0.3
+    },
+    {
+      "id": 104,
+      "name": "Річкова стерлядь",
+      "base": 11,
+      "value_mult": 1.25,
+      "cover": {"food": 1.25},
+      "tags": ["food", "specialty"],
+      "unit": "",
+      "origin": {"river": true},
+      "rarity": 0.5,
+      "divert": 0.25
+    },
+    {
+      "id": 105,
+      "name": "Північне хутро",
+      "base": 29,
+      "value_mult": 1.6,
+      "cover": {"utilities": 0.48, "luxury": 0.8},
+      "tags": ["luxury", "specialty"],
+      "unit": "",
+      "origin": {"bands": ["cold", "polar"]},
+      "rarity": 0.5,
+      "divert": 0.3
+    },
+    {
+      "id": 106,
+      "name": "Гірська руда",
+      "base": 4,
+      "value_mult": 1.45,
+      "cover": {"military": 0.2175},
+      "tags": ["ore", "military", "specialty"],
+      "unit": "",
+      "origin": {"bands": ["cold", "temperate"]},
+      "rarity": 0.4,
+      "divert": 0.2
+    },
+    {
+      "id": 107,
+      "name": "Виноградне вино",
+      "base": 13,
+      "value_mult": 1.5,
+      "cover": {"food": 0.75, "luxury": 0.75},
+      "tags": ["food", "luxury", "specialty"],
+      "unit": "",
+      "origin": {"bands": ["tropical", "temperate"]},
+      "rarity": 0.5,
+      "divert": 0.25
+    },
+    {
+      "id": 108,
+      "name": "Оливкова олія",
+      "base": 14,
+      "value_mult": 1.4,
+      "cover": {"food": 1.4},
+      "tags": ["food", "specialty"],
+      "unit": "",
+      "origin": {"bands": ["tropical", "temperate"], "coast": true},
+      "rarity": 0.35,
+      "divert": 0.2
+    },
+    {
+      "id": 109,
+      "name": "Гончарна глина",
+      "base": 41,
+      "value_mult": 1.3,
+      "cover": {"construction": 1.3},
+      "tags": ["construction", "specialty"],
+      "unit": "",
+      "origin": {"river": true},
+      "rarity": 0.45,
+      "divert": 0.25
+    },
+    {
+      "id": 110,
+      "name": "Приморське скло",
+      "base": 47,
+      "value_mult": 1.4,
+      "cover": {"luxury": 1.4},
+      "tags": ["luxury", "specialty"],
+      "unit": "",
+      "origin": {"coast": true},
+      "rarity": 0.4,
+      "divert": 0.3
+    },
+    {
+      "id": 111,
+      "name": "Конопляне волокно",
+      "base": 21,
+      "value_mult": 1.3,
+      "cover": {"utilities": 0.39},
+      "tags": ["specialty"],
+      "unit": "",
+      "origin": {"bands": ["temperate"]},
+      "rarity": 0.4,
+      "divert": 0.2
+    },
+    {
+      "id": 112,
+      "name": "Лісова деревина",
+      "base": 1,
+      "value_mult": 1.35,
+      "cover": {"utilities": 1.35, "construction": 1.35},
+      "tags": ["construction", "specialty"],
+      "unit": "",
+      "origin": {"bands": ["cold", "temperate"]},
+      "rarity": 0.45,
+      "divert": 0.2
+    }
+  ]
+}

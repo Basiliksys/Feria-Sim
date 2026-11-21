@@ -18,7 +18,7 @@ import os
 import random
 import re
 
-from . import lore_data as LD
+from . import geography as GT, lore_data as LD
 
 BULK_RATE = 100.0   # од. сировини на 1000 селян/міс при biomeOutput = 1
 POINT_RATE = 18.0   # од. на 1000 селян/міс для «точкових» ресурсів клітинки
@@ -1078,7 +1078,7 @@ def import_map(path):
         st["landmass"] = feat.get(cb["feature"], {}).get("name") if cb else None
 
     pop_total = sum(b["pop"] + b["rural"] for b in burgs.values())
-    return _sanitize_numbers(dict(
+    world = dict(
         meta=dict(
             map_version=head[0] if head else "unknown",
             map_date=head[2] if len(head) > 2 else "",
@@ -1094,7 +1094,10 @@ def import_map(path):
         goods=goods, markets=markets, edges=edges, states=states, burgs=burgs, provinces=provinces,
         cultures=culture_out, religions=religions_out, markers=markers,
         history_wars=history_wars, war_zones=campaigns_zones,
-    ))
+    )
+    # Географію рахуємо тут, поки є клітинки карти; у сейв піде лише агрегація.
+    GT.build_geography(world, c_biome=c_biome, c_market=c_market, biomes=biomes, features=features)
+    return _sanitize_numbers(world)
 
 
 def _write_json_safe(obj, path, *, compact=False):
