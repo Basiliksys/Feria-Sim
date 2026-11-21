@@ -306,10 +306,11 @@ def step_finance(sim, rng):
                 if remaining <= 1e-9:
                     break
                 cv = sim.goods[g]["cover"]["military"]
-                q = min(remaining / cv, mk["stock"].get(g, 0.0) * 0.5)
+                avail = max(0.0, _finite_num(mk["stock"].get(g, 0.0), 0.0))
+                q = min(remaining / cv, avail * 0.5)
                 if q <= 0:
                     continue
-                mk["stock"][g] -= q
+                mk["stock"][g] = max(0.0, avail - q)
                 spent_goods += q * mk["price"].get(g, sim.goods[g]["value"])
                 remaining -= q * cv
                 got += q * cv

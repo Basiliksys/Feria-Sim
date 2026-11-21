@@ -5,14 +5,14 @@
 <title>Ферія — Симуляція економіки та подій</title>
 <style>
   :root {
-    --ink: #101926; --ink-2: #162231; --ink-3: #1b2a3a;
-    --parchment: #E7DDC7; --verdigris: #2F6F63; --oxblood: #7A2E3B;
-    --brass: #B08D57; --slate: #70809A;
+    --ink: #070c13; --ink-2: #0c141e; --ink-3: #111c28;
+    --parchment: #DCD2B8; --verdigris: #2A6359; --oxblood: #6E2833;
+    --brass: #A88855; --slate: #6A7B95;
     --bg: var(--ink); --panel: var(--ink-2); --card: var(--ink-3);
-    --border: rgba(231,221,199,0.18); --rule: rgba(231,221,199,0.14);
+    --border: rgba(220,210,184,0.15); --rule: rgba(220,210,184,0.11);
     --text: var(--parchment); --muted: var(--slate);
-    --accent: var(--brass); --accent2: #8FB3AA;
-    --good: #6E9E7E; --ok: #6E9E7E; --bad: #C96A70; --warn: var(--brass); --warn-soft: #9FAE86;
+    --accent: var(--brass); --accent2: #82A69C;
+    --good: #639673; --ok: #639673; --bad: #C26067; --warn: var(--brass); --warn-soft: #93A279;
     --serif: "Iowan Old Style", "Palatino Linotype", Palatino, Georgia, serif;
     --sans: "Segoe UI", system-ui, -apple-system, sans-serif;
   }
@@ -28,7 +28,7 @@
   .pill b { color: var(--parchment); font-weight: 600; }
   .controls { margin-left: auto; display: flex; gap: 6px; flex-wrap: wrap; align-items: center; }
   button, select, input, textarea { background: transparent; color: var(--text); border: 1px solid var(--border); border-radius: 2px; padding: 6px 10px; font: inherit; }
-  textarea { background: rgba(0,0,0,0.15); }
+  textarea { background: rgba(0,0,0,0.28); }
   button { cursor: pointer; transition: border-color .15s, background-color .15s; }
   button:hover { border-color: var(--brass); color: var(--parchment); }
   button.primary { background: var(--verdigris); border-color: var(--verdigris); color: var(--parchment); }
@@ -46,7 +46,7 @@
   .g2 { grid-template-columns: minmax(0, 1.9fr) minmax(300px, 1fr); }
   .g3 { grid-template-columns: repeat(3, minmax(0, 1fr)); }
   .g4 { grid-template-columns: repeat(4, minmax(0, 1fr)); }
-  .card { background: var(--panel); border: 1px solid var(--rule); border-radius: 2px; padding: 14px 16px; }
+  .card { background: var(--panel); border: 1px solid var(--rule); border-radius: 2px; padding: 14px 16px; min-width: 0; }
   .card h3, .ledger-title { margin: 0 0 10px; font-size: 17px; color: var(--parchment); display: flex; justify-content: space-between; align-items: baseline; gap: 10px; flex-wrap: wrap; }
   .card h3 { border-bottom: 1px solid var(--rule); padding-bottom: 8px; }
   .ledger { border-top: 1px solid var(--rule); padding-top: 12px; margin-top: 14px; }
@@ -65,11 +65,11 @@
   .tag.bad { color: var(--bad); border-color: var(--bad); }
   .tag.warn { color: var(--warn); border-color: var(--warn); }
   .tag.warn-soft { color: var(--warn-soft); border-color: var(--warn-soft); }
-  .map-wrap { position: relative; background: #0B1623; border: 1px solid var(--border); border-radius: 2px; overflow: hidden; height: clamp(500px, 68vh, 820px); }
+  .map-wrap { position: relative; background: #050a11; border: 1px solid var(--border); border-radius: 2px; overflow: hidden; height: clamp(500px, 68vh, 820px); }
   canvas#map { width: 100%; height: 100%; display: block; cursor: grab; }
   canvas#map:active { cursor: grabbing; }
-  .map-legend { position: absolute; left: 12px; bottom: 12px; background: rgba(16,25,38,0.92); border: 1px solid var(--rule); border-left: 2px solid var(--brass); padding: 7px 11px; font-size: 12px; display: flex; gap: 12px; flex-wrap: wrap; max-width: calc(100% - 24px); }
-  .map-tip { position: absolute; pointer-events: none; background: rgba(16,25,38,0.96); border: 1px solid var(--brass); border-radius: 2px; padding: 7px 10px; font-size: 12px; display: none; z-index: 5; max-width: 270px; }
+  .map-legend { position: absolute; left: 12px; bottom: 12px; background: rgba(7,12,19,0.94); border: 1px solid var(--rule); border-left: 2px solid var(--brass); padding: 7px 11px; font-size: 12px; display: flex; gap: 12px; flex-wrap: wrap; max-width: calc(100% - 24px); }
+  .map-tip { position: absolute; pointer-events: none; background: rgba(7,12,19,0.97); border: 1px solid var(--brass); border-radius: 2px; padding: 7px 10px; font-size: 12px; display: none; z-index: 5; max-width: min(270px, calc(100% - 24px)); overflow-wrap: anywhere; }
   .map-mode-bar { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; font-weight: 400; font-size: 12px; }
   .row { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; margin-bottom: 8px; }
   .muted { color: var(--muted); }
@@ -77,16 +77,16 @@
   .toast { position: fixed; right: 18px; bottom: 18px; background: var(--ink); border: 1px solid var(--brass); border-radius: 2px; padding: 10px 14px; z-index: 50; display: none; max-width: 420px; }
   a.link { color: var(--accent2); cursor: pointer; text-decoration: none; border-bottom: 1px dotted currentColor; }
   a.link:hover { color: var(--parchment); }
-  .modal-bg { position: fixed; inset: 0; background: rgba(8,12,18,0.78); display: none; align-items: center; justify-content: center; z-index: 60; padding: 16px; }
+  .modal-bg { position: fixed; inset: 0; background: rgba(3,5,8,0.86); display: none; align-items: center; justify-content: center; z-index: 60; padding: 16px; }
   .modal-bg.open { display: flex; }
   .modal { background: var(--ink); border: 1px solid var(--brass); border-radius: 2px; max-width: 580px; width: 100%; padding: 20px; box-shadow: 0 18px 60px rgba(0,0,0,0.55); }
   .dropzone { border: 1px dashed var(--border); padding: 22px; text-align: center; cursor: pointer; margin: 10px 0; transition: border-color .15s; background: var(--panel); }
   .dropzone:hover, .dropzone.drag { border-color: var(--brass); background: var(--ink-3); }
-  .field-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(230px, 1fr)); gap: 10px 16px; }
-  .field-row { display: grid; grid-template-columns: minmax(130px, 1.2fr) 92px minmax(90px, 1.4fr); align-items: center; gap: 8px; padding: 5px 0; border-bottom: 1px solid var(--rule); }
-  .field-row label { font-size: 12.5px; color: var(--muted); }
-  .field-row input[type=number] { width: 100%; padding: 4px 6px; text-align: right; }
-  .field-row input[type=range] { width: 100%; accent-color: var(--verdigris); }
+  .field-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(360px, 1fr)); gap: 8px 18px; }
+  .field-row { display: grid; grid-template-columns: minmax(0, 1fr) 160px minmax(0, 1fr); align-items: center; gap: 8px; padding: 5px 0; border-bottom: 1px solid var(--rule); min-width: 0; }
+  .field-row label { font-size: 12.5px; color: var(--muted); min-width: 0; line-height: 1.25; overflow-wrap: anywhere; }
+  .field-row input[type=number] { width: 100%; min-width: 0; padding: 4px 6px; text-align: right; font-size: 12px; font-variant-numeric: tabular-nums; }
+  .field-row input[type=range] { width: 100%; min-width: 0; accent-color: var(--verdigris); }
   .field-row input[type=checkbox] { accent-color: var(--verdigris); }
   .field-row.bool-row { grid-template-columns: 1fr auto auto; }
   .chip { display: inline-block; padding: 2px 7px; border: 1px solid var(--rule); background: var(--card); font-size: 11px; color: var(--muted); }
@@ -95,7 +95,7 @@
   .action-bar { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 8px; }
   .section-rule { height: 1px; background: var(--rule); margin: 14px 0; }
   @media (max-width: 1100px) { .g2, .g3, .g4 { grid-template-columns: 1fr; } .map-wrap { height: min(64vh, 580px); } }
-  @media (max-width: 640px) { header { padding: 8px 10px; } .brand { font-size: 19px; margin-right: 8px; } .pill { padding: 2px 8px; } nav { padding: 0 8px; } main { padding: 10px; } .card { padding: 11px; } .field-row, .field-row.bool-row { grid-template-columns: 1fr 90px; } .field-row input[type=range] { grid-column: 1 / -1; } }
+  @media (max-width: 640px) { header { padding: 8px 10px; } .brand { font-size: 19px; margin-right: 8px; } .pill { padding: 2px 8px; } nav { padding: 0 8px; } main { padding: 10px; } .card { padding: 11px; min-width: 0; } .field-grid { grid-template-columns: minmax(0, 1fr); } .field-row, .field-row.bool-row { grid-template-columns: minmax(0, 1fr) 160px; } .field-row input[type=range] { grid-column: 1 / -1; } }
   @media (prefers-reduced-motion: reduce) { *, *::before, *::after { transition: none !important; animation: none !important; scroll-behavior: auto !important; } }
 </style>
 </head>
@@ -141,6 +141,8 @@
               <option value="food_sat">Забезпечення міст</option>
               <option value="loyalty">Лояльність намісників</option>
               <option value="trade">Торгові потоки</option>
+              <option value="caravans">Каравани й магістралі</option>
+              <option value="geography">Географія й спецтовари</option>
               <option value="scarcity">Дефіцит ринків</option>
               <option value="stability">Стабільність</option>
               <option value="wealth">Багатство</option>
@@ -172,6 +174,15 @@
         <div class="card">
           <h3>Активні події та лиха (<span id="ev-cnt">0</span>)</h3>
           <div class="scroll" style="max-height:220px" id="active-events"></div>
+        </div>
+        <div class="card">
+          <h3>Активні каравани (<span id="caravan-cnt">0</span>)
+            <span class="map-mode-bar" style="font-weight:400">
+              <button onclick="showTab('overview');document.getElementById('map-mode').value='caravans';drawMap()">Показати на карті</button>
+            </span>
+          </h3>
+          <p class="ledger-note">Вантаж іде готовими магістралями карти; на проміжних ринках — лише транзит і мито.</p>
+          <div class="scroll" style="max-height:200px" id="caravan-list"></div>
         </div>
         <div class="card">
           <h3>Рішення майстра гри <span class="chip" id="choice-cnt">0</span></h3>
@@ -225,8 +236,9 @@
   <section id="tab-economy" class="tab">
     <div class="grid g2">
       <div class="card">
-        <h3>Світовий каталог (71 товар)
+        <h3>Світовий каталог <span id="gd-count" class="muted"></span>
           <input id="gd-search" placeholder="Пошук товару..." oninput="renderGoodsTable()">
+          <label style="font-weight:400"><input type="checkbox" id="gd-local" onchange="renderGoodsTable()"> Лише місцеві</label>
         </h3>
         <div class="scroll" style="max-height:640px">
           <table>
@@ -310,6 +322,15 @@
             <button onclick="clearRouteOverlay()">Очистити на карті</button>
           </div>
           <div id="rt-result" class="muted">Оберіть два міста й натисніть «Прокласти маршрут».</div>
+        </div>
+
+        <div class="card">
+          <h3>Готові магістралі світу</h3>
+          <div class="row">
+            <select id="hw-route" style="flex:1" onchange="showHighway()" aria-label="Магістраль"></select>
+            <button onclick="showHighway()">Показати</button>
+          </div>
+          <div id="hw-result" class="muted">Реєстр магістралей будується з торгових шляхів карти.</div>
         </div>
 
         <div class="card">
@@ -565,6 +586,13 @@ async function refresh() {
   document.getElementById('h-brand').textContent = '⚔ ' + (DATA.world_name || 'Ферія');
   const badge = document.getElementById('map-econ-badge');
   if (badge) badge.textContent = DATA.has_native_economy ? 'економіка з .map' : 'синтезована економіка';
+  const geoOpt = document.querySelector('#map-mode option[value="geography"]');
+  if (geoOpt) {
+    const enabled = !DATA.config_flags || DATA.config_flags.geography_enabled !== false;
+    geoOpt.hidden = !enabled;
+    const sel = document.getElementById('map-mode');
+    if (!enabled && sel.value === 'geography') { sel.value = 'political'; }
+  }
   document.getElementById('h-date').textContent = DATA.date;
   document.getElementById('h-pop').textContent = fmtN(DATA.tot_pop);
   document.getElementById('h-gdp').textContent = fmtN(DATA.tot_gdp) + ' зм';
@@ -593,6 +621,8 @@ async function refresh() {
   }
   renderWorldCharts();
   renderActiveEvents();
+  renderCaravans();
+  renderHighways();
   renderEventChoices();
   renderRecentJournal();
   renderStatesTable();
@@ -633,7 +663,7 @@ function resetView() {
   view = { s, x: (cv.clientWidth - DATA.width * s) / 2, y: (cv.clientHeight - DATA.height * s) / 2 };
   drawMap();
 }
-const MAP_COLORS = { ink: [16,25,38], parchment: [231,221,199], verdigris: [47,111,99], oxblood: [122,46,59], brass: [176,141,87], slate: [112,128,154] };
+const MAP_COLORS = { ink: [7,12,19], parchment: [220,210,184], verdigris: [42,99,89], oxblood: [110,40,51], brass: [168,136,85], slate: [106,123,149] };
 function rgba(c, a) { return `rgba(${c[0]},${c[1]},${c[2]},${a})`; }
 function mix(a, b, t) {
   const k = Math.max(0, Math.min(1, t));
@@ -642,6 +672,17 @@ function mix(a, b, t) {
 function heat(t, alpha = 0.82) {
   return t < 0.5 ? rgba(mix(MAP_COLORS.oxblood, MAP_COLORS.brass, t * 2), alpha)
                  : rgba(mix(MAP_COLORS.brass, MAP_COLORS.verdigris, (t - 0.5) * 2), alpha);
+}
+const BAND_COLORS = {
+  polar: [150, 176, 196], cold: [42, 99, 89],
+  temperate: [168, 136, 85], tropical: [110, 40, 51]
+};
+function bandColor(band, alpha = 0.95) {
+  return rgba(BAND_COLORS[band] || MAP_COLORS.slate, alpha);
+}
+function geoGoodNames(ids) {
+  const names = (DATA?.geography?.goods) || {};
+  return (ids || []).map(id => names[id] || `#${id}`).join(', ');
 }
 function _stateHeatColor(s, warStates, epiStates, maxGdp, mode) {
   if (mode === 'food') {
@@ -662,7 +703,7 @@ function _stateHeatColor(s, warStates, epiStates, maxGdp, mode) {
     if (epiStates.has(s.id)) return rgba(MAP_COLORS.brass, 0.78);
     return rgba(MAP_COLORS.slate, 0.45);
   }
-  if (mode === 'loyalty' || mode === 'trade' || mode === 'scarcity') return rgba(MAP_COLORS.slate, 0.30);
+  if (mode === 'loyalty' || mode === 'trade' || mode === 'scarcity' || mode === 'caravans' || mode === 'geography') return rgba(MAP_COLORS.slate, 0.30);
   return s.color || rgba(MAP_COLORS.slate, 0.6);
 }
 function updateMapLegend(mode) {
@@ -677,6 +718,8 @@ function updateMapLegend(mode) {
     food_sat: '<span>Бідний ↔ забезпечений</span>',
     loyalty: '<span>Коло — лояльність намісника</span>',
     trade: '<span>Лінія — обсяг торгівлі</span>',
+    caravans: '<span>Суцільна лінія — магістраль, ● — караван із вантажем</span>',
+    geography: '<span>Кільце — кліматичний пояс, ⚓ — порт, ≈ — річка, зірка — регіон зі specialties</span>',
     scarcity: '<span>Квадрат — ціна до бази</span>',
     stability: '<span>Низька ↔ висока</span>',
     wealth: '<span>Бідна ↔ багата держава</span>',
@@ -697,7 +740,7 @@ function drawMap() {
   }
   const ctx = cv.getContext('2d');
   ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-  ctx.fillStyle = '#08121c'; ctx.fillRect(0, 0, w, h);
+  ctx.fillStyle = '#04080e'; ctx.fillRect(0, 0, w, h);
   ctx.save(); ctx.translate(view.x, view.y); ctx.scale(view.s, view.s);
 
   const mode = document.getElementById('map-mode')?.value || 'political';
@@ -730,7 +773,7 @@ function drawMap() {
     }
     ctx.restore();
 
-    ctx.fillStyle = '#0B1623';
+    ctx.fillStyle = '#060d16';
     for (const p of GEO.lakes) ctx.fill(p);
 
     ctx.strokeStyle = rgba(MAP_COLORS.slate, 0.55);
@@ -790,6 +833,30 @@ function drawMap() {
     }
   }
 
+  // Магістралі й каравани — окремий шар поверх звичайних торгових ліній.
+  if (mode === 'caravans' || mode === 'trade') {
+    if (mode === 'caravans') {
+      for (const r of (DATA.trade_routes || [])) {
+        const pts = (r.points || []).filter(p => Number.isFinite(p.x) && Number.isFinite(p.y));
+        if (pts.length < 2) continue;
+        ctx.save();
+        ctx.strokeStyle = r.sea ? rgba(MAP_COLORS.slate, 0.85) : rgba(MAP_COLORS.brass, 0.9);
+        ctx.lineWidth = 2.4 / view.s;
+        if (r.sea) ctx.setLineDash([7 / view.s, 5 / view.s]);
+        ctx.beginPath(); ctx.moveTo(pts[0].x, pts[0].y);
+        for (let i = 1; i < pts.length; i++) ctx.lineTo(pts[i].x, pts[i].y);
+        ctx.stroke(); ctx.restore();
+      }
+    }
+    for (const c of (DATA.caravans || [])) {
+      if (!Number.isFinite(c.x) || !Number.isFinite(c.y)) continue;
+      const r = 5.2 / view.s;
+      ctx.fillStyle = (c.qty || 0) > 20 ? rgba(MAP_COLORS.oxblood, 0.98) : rgba(MAP_COLORS.verdigris, 0.98);
+      ctx.beginPath(); ctx.arc(c.x, c.y, r, 0, Math.PI * 2); ctx.fill();
+      ctx.strokeStyle = rgba(MAP_COLORS.parchment, 0.9); ctx.lineWidth = 1 / view.s; ctx.stroke();
+    }
+  }
+
   // Підсвічений маршрут подорожі з D&D-калькулятора
   if (window._activeRoute?.points?.length > 1) {
     const pts = window._activeRoute.points;
@@ -820,11 +887,25 @@ function drawMap() {
     }
   }
   for (const m of DATA.markets) {
-    const r = (mode === 'scarcity' ? 5.8 : 4.2) / Math.pow(view.s, 0.55);
+    const r = (mode === 'scarcity' || mode === 'geography' ? 5.8 : 4.2) / Math.pow(view.s, 0.55);
     if (mode === 'scarcity') {
       const ratio = m.scarcity ?? 1;
       ctx.fillStyle = heat(Math.min(1, Math.max(0, (ratio - 0.8) / 1.4)), 0.88);
       ctx.fillRect(m.x - r, m.y - r, r * 2, r * 2);
+    }
+    if (mode === 'geography') {
+      ctx.fillStyle = bandColor(m.band, 0.88);
+      ctx.fillRect(m.x - r, m.y - r, r * 2, r * 2);
+      if (m.coast || m.river) {
+        ctx.strokeStyle = rgba(MAP_COLORS.parchment, 0.85);
+        ctx.lineWidth = 1.0 / view.s;
+        ctx.beginPath(); ctx.arc(m.x, m.y, r + 3 / view.s, 0, Math.PI * 2); ctx.stroke();
+      }
+      if ((m.specialties || []).length) {
+        ctx.fillStyle = rgba(MAP_COLORS.brass, 1);
+        const sr = 2.4 / Math.pow(view.s, 0.55);
+        ctx.beginPath(); ctx.arc(m.x, m.y - r - 6 / view.s, sr, 0, Math.PI * 2); ctx.fill();
+      }
     }
     ctx.strokeStyle = epiMks.has(m.id) ? rgba(MAP_COLORS.oxblood, 0.95) : rgba(MAP_COLORS.parchment, 0.85);
     ctx.lineWidth = 1.2 / view.s;
@@ -871,11 +952,18 @@ function drawMap() {
     for (const s of DATA.states) {
       if (s.gdp > 50000 || view.s > 1.3) ctx.fillText(s.uk, s.cx + 6 / view.s, s.cy - 4 / view.s);
     }
-    if (showProvs && view.s > 1.25) {
+    if ((showProvs || mode === 'geography') && view.s > 1.25) {
       ctx.font = `${Math.max(8, 9.5 / view.s)}px sans-serif`;
       ctx.fillStyle = 'rgba(212,166,74,0.90)';
       for (const p of provs) {
-        if (p.x != null && p.y != null) ctx.fillText(p.uk, p.x + 7 / view.s, p.y + 3 / view.s);
+        if (p.x == null || p.y == null) continue;
+        if (mode === 'geography') {
+          const reg = (DATA.geography?.regions || {})[p.id];
+          if (!(reg?.specialties || []).length) continue;
+          ctx.fillText('★ ' + p.uk, p.x + 7 / view.s, p.y + 3 / view.s);
+        } else {
+          ctx.fillText(p.uk, p.x + 7 / view.s, p.y + 3 / view.s);
+        }
       }
     }
   }
@@ -893,6 +981,15 @@ function _findStateAtPoint(wx, wy) {
   }
   ctx.restore();
   return hit;
+}
+function placeMapTip(tip, mx, my) {
+  // Тримаємо підказку всередині карти: інакше вона обрізається overflow:hidden.
+  const wrap = tip.parentElement;
+  tip.style.display = 'block';
+  const maxX = Math.max(0, wrap.clientWidth - tip.offsetWidth - 8);
+  const maxY = Math.max(0, wrap.clientHeight - tip.offsetHeight - 8);
+  tip.style.left = Math.min(Math.max(4, mx + 14), maxX) + 'px';
+  tip.style.top = Math.min(Math.max(4, my + 14), maxY) + 'px';
 }
 function initMapEvents() {
   const cv = document.getElementById('map'), tip = document.getElementById('map-tip');
@@ -924,7 +1021,23 @@ function initMapEvents() {
       if (bestP) {
         const flag = bestP.occupied_by != null ? ' · 🚩 Окуповано' : (bestP.siege > 0 ? ` · ⚔ Облога ${bestP.siege}%` : '');
         tip.innerHTML = `<b>${escHtml(bestP.uk)}</b> (${escHtml(bestP.state_uk)})${flag}<br>Намісник: ${escHtml(bestP.governor || '—')} · Лояльність: <b>${bestP.loyalty}%</b><br><span class="muted">${escHtml(bestP.specialty || '')} · Клік — картка</span>`;
-        tip.style.left = (mx + 12) + 'px'; tip.style.top = (my + 12) + 'px'; tip.style.display = 'block';
+        placeMapTip(tip, mx, my);
+        return;
+      }
+    }
+    if (mode === 'geography') {
+      let bestMk = null, bm = (16 / view.s) ** 2;
+      for (const mk of DATA.markets) {
+        if (!Number.isFinite(mk.x) || !Number.isFinite(mk.y)) continue;
+        const d = (mk.x - wx)**2 + (mk.y - wy)**2;
+        if (d < bm) { bm = d; bestMk = mk; }
+      }
+      if (bestMk) {
+        const bio = (DATA.geography?.biomes || {})[bestMk.biome];
+        const flags = [bestMk.coast ? 'порт' : '', bestMk.river ? 'річка' : ''].filter(Boolean).join(' · ');
+        const spec = geoGoodNames(bestMk.specialties);
+        tip.innerHTML = `<b>${escHtml(bestMk.uk)}</b> · ${escHtml(bestMk.band || '—')}${bio ? ` · ${escHtml(bio.name)}` : ''}${flags ? `<br>${escHtml(flags)}` : ''}${spec ? `<br><span style="color:var(--brass)">★ ${escHtml(spec)}</span>` : '<br><span class="muted">спеціалізацій немає</span>'}<br><span class="muted">Клік — деталі ринку</span>`;
+        placeMapTip(tip, mx, my);
         return;
       }
     }
@@ -935,13 +1048,13 @@ function initMapEvents() {
       const pr = provs.find(p => p.burg === best.id);
       const prTxt = pr ? `<br>Провінція: ${escHtml(pr.uk)} (${pr.loyalty}%${pr.siege > 0 ? `, облога ${pr.siege}%` : ''}${pr.occupied_by != null ? ', окуповано' : ''})` : '';
       tip.innerHTML = `<b>${escHtml(best.uk)}</b> ${best.cap?'★':''}${best.port?'⚓':''}<br>${st ? escHtml(st.uk) : ''}${prTxt}<br>Населення: ${fmtN(best.pop)}${st?`<br>Їжа: ${st.food_idx}x · Стаб.: ${st.stab.toFixed(0)}`:''}`;
-      tip.style.left = (mx + 12) + 'px'; tip.style.top = (my + 12) + 'px'; tip.style.display = 'block';
+      placeMapTip(tip, mx, my);
     } else {
       const sid = _findStateAtPoint(wx, wy);
       const st = sid != null ? DATA.states.find(s => s.id === sid) : null;
       if (st) {
         tip.innerHTML = `<b>${escHtml(st.uk)}</b> (${escHtml(st.cont)})<br>Насел.: ${fmtN(st.pop)} · Стаб.: ${st.stab.toFixed(0)}<br>Їжа: ${st.food_idx}x · ВВП: ${fmtN(st.gdp)}`;
-        tip.style.left = (mx + 12) + 'px'; tip.style.top = (my + 12) + 'px'; tip.style.display = 'block';
+        placeMapTip(tip, mx, my);
       } else tip.style.display = 'none';
     }
   });
@@ -958,6 +1071,15 @@ function initMapEvents() {
         if (d < bp) { bp = d; bestP = p; }
       }
       if (bestP) { openProvince(bestP.id); return; }
+    }
+    if (mode === 'geography') {
+      let bestMk = null, bm = (16 / view.s) ** 2;
+      for (const mk of DATA.markets) {
+        if (!Number.isFinite(mk.x) || !Number.isFinite(mk.y)) continue;
+        const d = (mk.x - wx)**2 + (mk.y - wy)**2;
+        if (d < bm) { bm = d; bestMk = mk; }
+      }
+      if (bestMk) { openMarket(bestMk.id); return; }
     }
     let best = null, bd = (16 / view.s) ** 2;
     for (const b of DATA.burgs) { const d = (b.x - wx)**2 + (b.y - wy)**2; if (d < bd) { bd = d; best = b; } }
@@ -982,7 +1104,7 @@ function svgMulti(series, label, fmt) {
   return `<div style="margin-bottom:10px;border-bottom:1px solid var(--rule);padding-bottom:8px">
     <div style="font-size:12px;display:flex;justify-content:space-between;gap:8px"><span>${escHtml(label)}</span><span class="muted">${fmt(mn)} — ${fmt(mx)}</span></div>
     <div style="font-size:11px;margin:2px 0">${legend}</div>
-    <svg viewBox="0 0 ${W} ${H}" style="width:100%;height:54px;background:rgba(16,25,38,0.7);border:1px solid var(--rule)">${lines}</svg></div>`;
+    <svg viewBox="0 0 ${W} ${H}" style="width:100%;height:54px;background:rgba(7,12,19,0.7);border:1px solid var(--rule)">${lines}</svg></div>`;
 }
 function renderWorldCharts() {
   const h = DATA.history || [];
@@ -1015,6 +1137,42 @@ function renderActiveEvents() {
   }
   document.getElementById('active-events').innerHTML = html || '<span class="muted">Спокійно</span>';
 }
+
+function renderCaravans() {
+  const list = DATA.caravans || [];
+  const box = document.getElementById('caravan-list');
+  if (!box) return;
+  document.getElementById('caravan-cnt').textContent = list.length;
+  const sorted = [...list].sort((a, b) => (b.qty || 0) - (a.qty || 0));
+  box.innerHTML = sorted.slice(0, 24).map(c => `<div style="margin-bottom:5px">
+      <span class="tag ${(c.qty || 0) > 20 ? 'bad' : 'good'}">${fmtN(c.qty)}</span>
+      <b>${escHtml(c.good_name || c.good)}</b> · ${escHtml(c.at_uk)} → ${escHtml(c.dest_uk)}<br>
+      <span class="muted" style="font-size:11px">${escHtml(c.route_name)} · ETA ~${escHtml(c.eta_days)} дн.</span>
+    </div>`).join('') || '<span class="muted">Караванів у дорозі немає</span>';
+}
+
+function renderHighways() {
+  const sel = document.getElementById('hw-route');
+  if (!sel) return;
+  const routes = DATA.trade_routes || [];
+  const prev = sel.value;
+  sel.innerHTML = routes.map(r => `<option value="${escHtml(r.id)}">${escHtml(r.name)}</option>`).join('')
+    || '<option value="">Немає магістралей</option>';
+  if (prev && routes.some(r => String(r.id) === prev)) sel.value = prev;
+  showHighway();
+}
+
+function showHighway() {
+  const sel = document.getElementById('hw-route');
+  const box = document.getElementById('hw-result');
+  if (!sel || !box) return;
+  const r = (DATA.trade_routes || []).find(x => String(x.id) === sel.value);
+  if (!r) { box.textContent = 'Немає магістралей.'; return; }
+  const names = (r.points || []).map(p => escHtml(p.uk)).join(' → ');
+  box.innerHTML = `<b>${escHtml(r.name)}</b><br><span class="muted">${names}</span><br>
+    <span class="chip">${fmtN(r.dist)} од.</span> <span class="chip">cap ${escHtml(r.cap)}</span>${r.sea ? ' <span class="chip">море</span>' : ''}`;
+}
+
 async function renderEventChoices() {
   const box = document.getElementById('event-choices-box');
   if (!box) return;
@@ -1082,11 +1240,11 @@ async function openState(sid) {
     </div>
     <p>${escHtml(d.cont)} · ${escHtml(d.gov)} · ${escHtml(d.culture)} / ${escHtml(d.religion)} · Валюта: <b>${escHtml(d.coins)}</b></p>
     ${d.lore?`<p class="muted">${escHtml(d.lore)}</p>`:''}
-    <p><b>Правитель:</b> ${escHtml(d.ruler.name)} ${d.ruler.age?`(${d.ruler.age} р.)`:''} — ${d.ruler_traits.join(', ')}</p>
+    <p><b>Правитель:</b> ${escHtml(d.ruler.name)} ${d.ruler.age?`(${d.ruler.age} р.)`:''} — ${escHtml(d.ruler_traits.join(', '))}</p>
     <div class="grid g3" style="margin:10px 0">
       <div class="pill">Населення: <b>${fmtN(s.pop)}</b></div>
       <div class="pill">ВВП/міс: <b>${fmtN(s.gdp)}</b></div>
-      <div class="pill">Казна: <b>${s.treasury_coins}</b></div>
+      <div class="pill">Казна: <b>${escHtml(s.treasury_coins)}</b></div>
       <div class="pill">Дохід/Витрати: <b>${fmtN(s.rev)} / ${fmtN(s.exp)}</b></div>
       <div class="pill">Стаб./Легіт.: <b>${s.stab} / ${s.leg}</b></div>
       <div class="pill">Армія (сила): <b>${fmtN(s.power)}</b></div>
@@ -1222,10 +1380,13 @@ async function loadGoods(autoLoad = true) {
 function renderGoodsTable() {
   if (!window._goods) return;
   const q = document.getElementById('gd-search').value.toLowerCase();
-  const rows = window._goods.filter(g => !q || g.name.toLowerCase().includes(q));
+  const localOnly = document.getElementById('gd-local')?.checked;
+  const rows = window._goods.filter(g => (!q || g.name.toLowerCase().includes(q)) && (!localOnly || g.specialty));
+  const cnt = document.getElementById('gd-count');
+  if (cnt) cnt.textContent = `(${rows.length}/${window._goods.length})`;
   document.getElementById('goods-tbody').innerHTML = rows.map(g => `
     <tr>
-      <td><b>${escHtml(g.name)}</b> <span class="muted">(${escHtml(g.unit)})</span></td>
+      <td><b>${escHtml(g.name)}</b>${g.specialty ? ' <span class="tag">★ місцевий</span>' : ''} <span class="muted">(${escHtml(g.unit)})</span></td>
       <td class="num">${g.base}</td><td class="num">${g.min_p}</td><td class="num">${g.avg_p}</td><td class="num">${g.max_p}</td>
       <td><a class="link" onclick="openMarket(${jsArg(g.cheap_id)})">${escHtml(g.cheap_at)}</a></td>
       <td><a class="link" onclick="openMarket(${jsArg(g.exp_id)})">${escHtml(g.exp_at)}</a></td>
@@ -1242,7 +1403,8 @@ async function loadMarket(mid) {
   const d = await api('/api/market?id=' + mid);
   if (d.error) { toast(d.error); return; }
   document.getElementById('market-detail').innerHTML = `
-    <p>Держава: <a class="link" onclick="openState(${jsArg(d.state)})">${escHtml(d.state_uk)}</a> · Міст: ${d.burgs}</p>
+    <p>Держава: <a class="link" onclick="openState(${jsArg(d.state)})">${escHtml(d.state_uk)}</a> · Міст: ${escHtml(d.burgs)}</p>
+    ${d.geography ? `<p class="muted">Географія: ${escHtml(d.geography.band || '—')} · ${escHtml(d.geography.region || '—')}${d.geography.coast ? ' · порт' : ''}${d.geography.river ? ' · річка' : ''}${d.geography.specialties.length ? `<br><span style="color:var(--brass)">★ ${escHtml(d.geography.specialties.join(', '))}</span>` : ''}</p>` : ''}
     <p class="muted">Шляхи: ${d.routes.map(r=>`<a class="link" onclick="loadMarket(${jsArg(r.id)});document.getElementById('mk-select').value=${jsArg(r.id)}">${escHtml(r.uk)}</a> (${r.dist} км, ${r.sea?'море':'суша'}, потік ${r.flow})`).join('; ')}</p>
     <table><thead><tr><th>Товар</th><th class="num">Ціна</th><th>Монети</th><th class="num">% бази</th><th class="num">Запас</th><th class="num">Попит</th></tr></thead>
     <tbody>${d.goods.map(g=>`<tr><td>${escHtml(g.name)}</td><td class="num">${g.price}</td><td>${escHtml(g.coins)}</td><td class="num" style="color:${g.pct>150?'var(--bad)':g.pct<70?'var(--good)':'inherit'}">${g.pct}%</td><td class="num">${g.stock}</td><td class="num">${g.want}</td></tr>`).join('')}</tbody></table>`;
@@ -1435,14 +1597,14 @@ async function loadConfig() {
       const id = cfgId(f.key);
       if (f.type === 'bool') {
         return `<div class="field-row bool-row">
-          <label for="${id}">${escHtml(f.label)}</label>
+          <label for="${id}" title="${escHtml(f.label)}">${escHtml(f.label)}</label>
           <input id="${id}" type="checkbox" ${f.value ? 'checked' : ''} data-key="${escHtml(f.key)}" data-type="bool">
           <span class="chip">${f.value ? 'увімкнено' : 'вимкнено'}</span></div>`;
       }
       return `<div class="field-row">
-        <label for="${id}-num">${escHtml(f.label)}</label>
-        <input id="${id}-num" type="number" min="${f.min}" max="${f.max}" step="${f.step}" value="${f.value}" data-key="${escHtml(f.key)}" data-type="number" oninput="syncCfgNum(this,${jsArg(f.key)})">
-        <input id="${id}-range" type="range" min="${f.min}" max="${f.max}" step="${f.step}" value="${f.value}" aria-label="${escHtml(f.label)}" oninput="syncCfgRange(this,${jsArg(f.key)})"></div>`;
+        <label for="${id}-num" title="${escHtml(f.label)}">${escHtml(f.label)}</label>
+        <input id="${id}-num" type="number" min="${escHtml(f.min)}" max="${escHtml(f.max)}" step="${escHtml(f.step)}" value="${escHtml(f.value)}" title="${escHtml(f.value)}" data-key="${escHtml(f.key)}" data-type="number" oninput="syncCfgNum(this,${jsArg(f.key)})">
+        <input id="${id}-range" type="range" min="${escHtml(f.min)}" max="${escHtml(f.max)}" step="${escHtml(f.step)}" value="${escHtml(f.value)}" aria-label="${escHtml(f.label)}" title="${escHtml(f.label)}" oninput="syncCfgRange(this,${jsArg(f.key)})"></div>`;
     }).join('') || '<p class="ledger-note">Налаштувань поки немає.</p>';
   } catch (ex) { box.innerHTML = `<p class="muted">${escHtml(ex)}</p>`; }
 }
@@ -1557,7 +1719,7 @@ async function calcTravelRoute() {
   const dCls = dangerClass(r.danger_score);
   document.getElementById('rt-result').innerHTML = `
     <div style="margin-bottom:8px">
-      <b>${escHtml(r.from_uk)} → ${escHtml(r.to_uk)}</b> (${r.mode_name}) ·
+      <b>${escHtml(r.from_uk)} → ${escHtml(r.to_uk)}</b> (${escHtml(r.mode_name)}) ·
       <a class="link" onclick="showTab('overview');resetView()">Показати на карті</a>
     </div>
     <div class="grid g4" style="margin-bottom:8px">
@@ -1603,7 +1765,7 @@ async function renderQuestBoard() {
   html += active.length ? active.map(q => questLine({ ...q, _actions:
     `<button onclick="completeQuest(${jsArg(q.quest_id || q.id)}, true)">Успішно</button>
      <button onclick="completeQuest(${jsArg(q.quest_id || q.id)}, false)">Провал</button>` },
-    `, термін до ${q.due_tick ?? '—'}`)).join('')
+    `, термін до ${escHtml(q.due_tick ?? '—')}`)).join('')
     : '<p class="ledger-note">Прийнятих доручень немає. Візьміть завдання з дошки нижче.</p>';
   html += `<div class="ledger-title" style="margin-top:14px">Дошка оголошень (${hooks.length})</div>`;
   html += hooks.length ? hooks.map(h => questLine({ ...h, _actions:
@@ -1701,7 +1863,7 @@ function renderSlotsList(slots) {
   if (!slots.length) { box.innerHTML = '<p class="muted">Збережених слотів поки немає.</p>'; return; }
   box.innerHTML = slots.map(s => `
     <div style="display:flex;justify-content:space-between;align-items:center;padding:8px;border-bottom:1px solid var(--border);gap:8px">
-      <div><b>${escHtml(s.name)}</b><div class="muted" style="font-size:12px">${escHtml(s.world_name)} · ${escHtml(s.date)} · ${fmtN(s.pop)} жит. · ${s.saved_at}</div></div>
+      <div><b>${escHtml(s.name)}</b><div class="muted" style="font-size:12px">${escHtml(s.world_name)} · ${escHtml(s.date)} · ${fmtN(s.pop)} жит. · ${escHtml(s.saved_at)}</div></div>
       <span class="row" style="margin:0"><button class="primary" onclick="loadSlot(${jsArg(s.id)})">Завантажити</button><button class="danger" onclick="deleteSlot(${jsArg(s.id)})">✕</button></span>
     </div>`).join('');
 }
