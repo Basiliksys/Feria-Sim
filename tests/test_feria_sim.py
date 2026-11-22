@@ -13,13 +13,14 @@ import re
 import shutil
 import tempfile
 import threading
+import time
 import unittest
 import urllib.error
 import urllib.request
 import zlib
 from unittest import mock
 
-from feria_sim import cli, dnd_tools as DT, engine as E, events as EV, geography as GEO, importer as IM, lore_data as LD, politics as PO, report as RP, routes as RT, web, worldgen as WG
+from feria_sim import _accel as AC, cli, dnd_tools as DT, engine as E, events as EV, geography as GEO, importer as IM, lore_data as LD, politics as PO, report as RP, routes as RT, web, worldgen as WG
 
 
 def _sample_vanilla_map_lines(with_svg=True):
@@ -1273,6 +1274,77 @@ class TestFeriaSim(unittest.TestCase):
             self.assertIn("specialty_rate", keys)
             self.assertIn("geography_enabled", keys)
             self.assertIn("special_goods_enabled", keys)
+
+    def test_acceleration_geo_polygons_and_web_gzip(self):
+        """Прискорення (orjson/numpy/lxml/shapely/pydantic) ідентичне stdlib і має фолбек."""
+        sample = {1: {"name": "Ферія", "vals": [1.5, 2.25]}, "ok": True}
+        b_fast = AC.json_dumps_bytes(sample, allow_nan=False, compact=True, non_str_keys=True, use_orjson=True)
+        b_std = AC.json_dumps_bytes(sample, allow_nan=False, compact=True, non_str_keys=True, use_orjson=False)
+        self.assertEqual(E._intkeys(AC.json_loads(b_fast)), E._intkeys(AC.json_loads(b_std, use_orjson=False)))
+        with self.assertRaises(ValueError):
+            AC.json_dumps_bytes({"x": float("nan")}, allow_nan=False)
+
+        ratios = [0.8 + i * 0.05 for i in range(40)]
+        weights = [1.0 + (i % 5) for i in range(40)]
+        self.assertAlmostEqual(
+            AC.np_weighted_ratio_mean(ratios, weights, use_numpy=True),
+            AC.np_weighted_ratio_mean(ratios, weights, use_numpy=False),
+            places=10,
+        )
+
+        # Самозакривний <g id="provs" .../> не має захоплювати наступні групи
+        self.assertEqual(IM._svg_group_content('<svg><g id="provs"/><g id="zones"><path d="M0,0"/></g></svg>', "provs"), "")
+
+        with tempfile.TemporaryDirectory() as td:
+            _, wpath, jpath, _, _ = _build_calibrated_test_world(td, seed=19)
+            w = E.load_world(wpath)
+            raw_map = _sample_vanilla_map_lines(with_svg=True)
+            geo_full = IM.extract_map_geometry(raw_map, w)
+            with mock.patch.object(AC, "HAS_LXML", False), mock.patch.object(AC, "HAS_SHAPELY", False):
+                geo_std = IM.extract_map_geometry(raw_map, w)
+            self.assertEqual(geo_full["states"], geo_std["states"])
+            self.assertEqual(geo_full["borders"], geo_std["borders"])
+            self.assertEqual(geo_std["prov_bodies"], {})
+            if AC.HAS_SHAPELY:
+                self.assertEqual(set(geo_full["prov_bodies"]), {str(pid) for pid in w["provinces"]})
+
+            app = web.AppState(wpath, jpath)
+            app.overrides_file = os.path.join(td, "overrides.json")
+            srv = web.ThreadingHTTPServer(("127.0.0.1", 0), web.make_handler(app))
+            port = srv.server_port
+            t = threading.Thread(target=srv.serve_forever, daemon=True)
+            t.start()
+            try:
+                base = f"http://127.0.0.1:{port}"
+                req = urllib.request.Request(base + "/api/overview", headers={"Accept-Encoding": "gzip"})
+                with urllib.request.urlopen(req, timeout=5) as r:
+                    self.assertEqual(r.headers.get("Content-Encoding"), "gzip")
+                    ov = json.loads(gzip.decompress(r.read()).decode("utf-8"))
+                    self.assertIn("accel", ov)
+
+                req_async = urllib.request.Request(
+                    base + "/api/step_async",
+                    data=json.dumps({"months": 2}).encode("utf-8"),
+                    headers={"Content-Type": "application/json"},
+                    method="POST",
+                )
+                with urllib.request.urlopen(req_async, timeout=5) as r:
+                    started = json.loads(r.read().decode("utf-8"))
+                self.assertTrue(started["ok"])
+                job = None
+                for _ in range(50):
+                    with urllib.request.urlopen(base + "/api/job?id=" + started["job_id"], timeout=5) as r:
+                        job = json.loads(r.read().decode("utf-8"))
+                    if job["status"] == "done":
+                        break
+                    time.sleep(0.05)
+                self.assertIsNotNone(job)
+                self.assertEqual(job["status"], "done")
+                self.assertEqual(job["done"], 2)
+                self.assertEqual(job["overview"]["date"], "Березень 1250 Н.Е.")
+            finally:
+                srv.shutdown()
+                srv.server_close()
 
 
 if __name__ == "__main__":

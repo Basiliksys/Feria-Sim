@@ -2,7 +2,9 @@
 
 Симуляція економіки, геополітики та подій для настільно-рольових кампаній **D&D** із підтримкою карт **[Azgaar Fantasy Map Generator](https://azgaar.github.io/Fantasy-Map-Generator/)** (`.map`, `.map.gz`, `.json`), інтерактивною веб-панеллю, CLI та експортом нотаток до **Obsidian**.
 
-Працює на **Python 3.12+** виключно на стандартній бібліотеці — без сторонніх залежностей.
+Працює на **Python 3.12+** на стандартній бібліотеці — без обов'язкових сторонніх залежностей. За бажанням можна встановити опціональні прискорювачі (`pip install -e .[all]`): `orjson`, `numpy`, `lxml`, `shapely`, `pydantic`, `pytest`, `ruff` (див. [pyproject.toml](pyproject.toml)).
+
+Для ШІ-агентів та розробників див. [AGENTS.md](AGENTS.md) і [docs/AI_CONTEXT.md](docs/AI_CONTEXT.md).
 
 ---
 

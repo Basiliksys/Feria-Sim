@@ -1,0 +1,49 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "feria-sim"
+version = "0.2.0"
+description = "Економіко-геополітичний симулятор світу та D&D-інструментарій на базі карт Azgaar FMG"
+readme = "README.md"
+requires-python = ">=3.12"
+license = { text = "MIT" }
+dependencies = []
+
+[project.optional-dependencies]
+fast = ["orjson>=3.9", "numpy>=1.26"]
+geo = ["lxml>=5.0", "shapely>=2.0"]
+web = ["pydantic>=2.0"]
+dev = ["pytest>=8.0", "ruff>=0.4"]
+all = [
+  "orjson>=3.9",
+  "numpy>=1.26",
+  "lxml>=5.0",
+  "shapely>=2.0",
+  "pydantic>=2.0",
+  "pytest>=8.0",
+  "ruff>=0.4",
+]
+
+[project.scripts]
+feria-sim = "feria_sim.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["feria_sim*"]
+
+[tool.setuptools.package-data]
+feria_sim = ["ui.html", "goods_default.json"]
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
+testpaths = ["tests"]
+addopts = "-ra"
+
+[tool.ruff]
+target-version = "py312"
+line-length = 120
+exclude = ["save"]
+
+[tool.ruff.lint]
+select = ["E9", "F", "B"]

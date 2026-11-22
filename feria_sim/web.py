@@ -17,6 +17,7 @@ import webbrowser
 import zlib
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
+from . import _accel as AC
 from . import lore_data as LD
 from . import engine as E
 from . import importer as IM
@@ -148,7 +149,19 @@ def _write_text_atomic(path, text):
 
 def _write_json_atomic(path, obj):
     """Атомарний JSON-запис із забороною NaN/Infinity."""
-    _write_text_atomic(path, json.dumps(obj, ensure_ascii=False, indent=2, allow_nan=False))
+    os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+    tmp = f"{path}.tmp"
+    try:
+        raw = AC.json_dumps_bytes(obj, allow_nan=False, compact=False, non_str_keys=True)
+        with open(tmp, "wb") as f:
+            f.write(raw)
+        os.replace(tmp, path)
+    except BaseException:
+        try:
+            os.remove(tmp)
+        except OSError:
+            pass
+        raise
 
 
 def list_saved_maps(maps_dir, include_legacy=True):
@@ -192,6 +205,11 @@ def _coerce_config_value(key, value):
     """Повертає (ok, value). Для whitelist-полів допускаємо лише number/bool."""
     if key not in CONFIG_WHITELIST:
         return False, None
+    spec = next((s for s in CONFIG_FIELDS if s[0] == key), None)
+    bounds = (spec[2], spec[3], spec[4]) if spec else None
+    py_res = AC.pydantic_coerce_scalar(key, value, is_bool=(key in CONFIG_BOOLS), bounds=bounds)
+    if py_res is not None:
+        return py_res
     if key in CONFIG_BOOLS:
         if isinstance(value, bool):
             return True, value
@@ -231,6 +249,8 @@ class AppState:
         self.overrides_file = os.path.join(os.path.dirname(self.save_dir), "data", "overrides.json")
         self.vault = vault
         self.lock = threading.RLock()
+        self._jobs_lock = threading.Lock()
+        self._jobs = {}
         self.sim = E.Sim(E.load_world(world_file))
         self.sim.journal_path = journal_file
         self.sim.w.setdefault("meta", {})["journal_file"] = journal_file
@@ -466,6 +486,7 @@ class AppState:
                 tot_pop=round(sum(x["pop"] for x in states_out)),
                 tot_gdp=round(sum(x["gdp"] for x in states_out), 1),
                 indices={c: round(sim.price_index(c), 3) for c in LD.CATEGORIES},
+                accel=AC.capabilities(),
                 history=w["history"]["world"][-240:],
                 history_states=w["history"]["states"][-240:],
                 states=states_out, provinces=provinces_out, markets=markets_out, burgs=burgs_out, edges=edges_out,
@@ -1180,6 +1201,55 @@ class AppState:
                 RP.write_all(self.sim, self.vault)
             return self.overview()
 
+    def step_async(self, months=1, export_report=False):
+        try:
+            months = max(1, min(120, int(months)))
+        except (TypeError, ValueError):
+            months = 1
+        jid = uuid.uuid4().hex[:12]
+        with self._jobs_lock:
+            # зберігаємо лише останні 16 завдань
+            if len(self._jobs) > 16:
+                oldest = list(self._jobs.keys())[:-16]
+                for k in oldest:
+                    self._jobs.pop(k, None)
+            self._jobs[jid] = dict(id=jid, status="running", done=0, total=months, error=None, overview=None)
+
+        def _worker():
+            try:
+                with self.lock:
+                    self._push_undo(f"+{months} міс.")
+                for i in range(months):
+                    with self.lock:
+                        self.sim.tick()
+                    with self._jobs_lock:
+                        if jid in self._jobs:
+                            self._jobs[jid]["done"] = i + 1
+                with self.lock:
+                    self.save()
+                    if export_report:
+                        RP.write_all(self.sim, self.vault)
+                    ov = self.overview()
+                with self._jobs_lock:
+                    if jid in self._jobs:
+                        self._jobs[jid]["status"] = "done"
+                        self._jobs[jid]["overview"] = ov
+            except Exception as ex:
+                with self._jobs_lock:
+                    if jid in self._jobs:
+                        self._jobs[jid]["status"] = "error"
+                        self._jobs[jid]["error"] = str(ex)
+
+        threading.Thread(target=_worker, daemon=True).start()
+        return dict(ok=True, job_id=jid, total=months)
+
+    def job_status(self, job_id):
+        with self._jobs_lock:
+            job = self._jobs.get(str(job_id or ""))
+            if not job:
+                return dict(error="Завдання не знайдено")
+            return dict(job)
+
     def fire_event(self, key, target_id=None, sev=None):
         with self.lock:
             if key not in LD.EVENT_TABLE:
@@ -1255,7 +1325,7 @@ class AppState:
         er = LD.ERA_SHORT if era is None else str(era).strip()
         sd = int(seed) if seed not in (None, "") else 1
         world = WG.build_world(imp, seed=sd, overrides=over, start_year=yr, era=er)
-        world = E._intkeys(json.loads(json.dumps(world)))
+        world = E._intkeys(AC.json_loads(AC.json_dumps_bytes(world, allow_nan=False, compact=True, non_str_keys=True)))
         sim = E.Sim(world, seed=sd)
         WG.calibrate(sim, log=lambda *_: None)
         world["history"] = dict(states=[], world=[])
@@ -1337,11 +1407,17 @@ def make_handler(app: AppState, expected_hosts=None):
         def log_message(self, fmt, *args):
             pass
 
-        def _json(self, data, code=200):
-            raw = json.dumps(data, ensure_ascii=False, allow_nan=False).encode("utf-8")
+        def _send_bytes(self, raw, content_type, code=200):
+            ae = (self.headers.get("Accept-Encoding") or "").lower()
+            use_gzip = len(raw) >= 1024 and "gzip" in ae
+            if use_gzip:
+                raw = gzip.compress(raw, compresslevel=5)
             self.send_response(code)
-            self.send_header("Content-Type", "application/json; charset=utf-8")
+            self.send_header("Content-Type", content_type)
             self.send_header("Content-Length", str(len(raw)))
+            if use_gzip:
+                self.send_header("Content-Encoding", "gzip")
+                self.send_header("Vary", "Accept-Encoding")
             self.send_header("Cache-Control", "no-store")
             self.send_header("X-Content-Type-Options", "nosniff")
             self.send_header("Content-Security-Policy",
@@ -1349,6 +1425,10 @@ def make_handler(app: AppState, expected_hosts=None):
                              "style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'")
             self.end_headers()
             self.wfile.write(raw)
+
+        def _json(self, data, code=200):
+            raw = AC.json_dumps_bytes(data, allow_nan=False, compact=True, non_str_keys=True)
+            self._send_bytes(raw, "application/json; charset=utf-8", code=code)
 
         def _security_ok(self):
             addr = self.server.server_address
@@ -1416,16 +1496,7 @@ def make_handler(app: AppState, expected_hosts=None):
                 if u.path == "/":
                     with open(UI_FILE, "rb") as f:
                         body = f.read()
-                    self.send_response(200)
-                    self.send_header("Content-Type", "text/html; charset=utf-8")
-                    self.send_header("Content-Length", str(len(body)))
-                    self.send_header("Cache-Control", "no-store")
-                    self.send_header("X-Content-Type-Options", "nosniff")
-                    self.send_header("Content-Security-Policy",
-                                     "default-src 'self'; script-src 'self' 'unsafe-inline'; "
-                                     "style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'")
-                    self.end_headers()
-                    self.wfile.write(body)
+                    self._send_bytes(body, "text/html; charset=utf-8", code=200)
                 elif u.path == "/api/overview":
                     self._json(app.overview())
                 elif u.path == "/api/state":
@@ -1459,6 +1530,8 @@ def make_handler(app: AppState, expected_hosts=None):
                     self._json(app.npc_board())
                 elif u.path == "/api/slots":
                     self._json(dict(slots=app.list_slots()))
+                elif u.path == "/api/job":
+                    self._json(app.job_status(qs.get("id", [""])[0]))
                 else:
                     self._json({"error": "Not found"}, 404)
             except ValueError as ex:
@@ -1472,7 +1545,7 @@ def make_handler(app: AppState, expected_hosts=None):
                 u = urllib.parse.urlparse(self.path)
                 path = u.path
                 post_paths = {
-                    "/api/step", "/api/undo", "/api/fire", "/api/declare", "/api/peace",
+                    "/api/step", "/api/step_async", "/api/undo", "/api/fire", "/api/declare", "/api/peace",
                     "/api/set_state", "/api/override", "/api/set_config", "/api/event_choice",
                     "/api/quest_accept", "/api/quest_complete", "/api/shop_buy", "/api/npc",
                     "/api/fork", "/api/save_slot", "/api/load_slot", "/api/delete_slot",
@@ -1486,6 +1559,8 @@ def make_handler(app: AppState, expected_hosts=None):
                 body = self._body()
                 if path == "/api/step":
                     self._json(app.step(body.get("months", 1), body.get("report", False)))
+                elif path == "/api/step_async":
+                    self._json(app.step_async(body.get("months", 1), body.get("report", False)))
                 elif path == "/api/undo":
                     self._json(app.undo())
                 elif path == "/api/fire":

@@ -500,7 +500,15 @@
 
 <script>
 let DATA = null;
-let GEO = { ready: false, land: [], lakes: [], states: {}, borders: [], provBorders: [], rivers: [] };
+let GEO = { ready: false, land: [], lakes: [], states: {}, borders: [], provBorders: [], provBodies: {}, rivers: [] };
+let _drawRaf = null;
+function scheduleDrawMap() {
+  if (_drawRaf) return;
+  _drawRaf = requestAnimationFrame(() => {
+    _drawRaf = null;
+    drawMap();
+  });
+}
 let sortKey = 'gdp', sortDir = -1;
 let view = { x: 0, y: 0, s: 1 };
 let drag = null;
@@ -565,12 +573,17 @@ async function loadGeo(expectedKey = null) {
     lakes: (g.lakes || []).map(d => new Path2D(d)),
     borders: (g.borders || []).map(d => new Path2D(d)),
     provBorders: (g.prov_borders || []).map(d => new Path2D(d)),
+    provBodies: {},
     rivers: (g.rivers || []).map(d => new Path2D(d)),
     states: {},
   };
   for (const [sid, d] of Object.entries(g.states || {})) {
     if (d) GEO.states[sid] = new Path2D(d);
   }
+  for (const [pid, d] of Object.entries(g.prov_bodies || {})) {
+    if (d) GEO.provBodies[pid] = new Path2D(d);
+  }
+  _geoLayerCache.key = null;
   drawMap();
 }
 
@@ -638,9 +651,29 @@ async function refresh() {
 async function stepSim(months) {
   document.querySelectorAll('.controls button').forEach(b => b.disabled = true);
   try {
+    if (months >= 6) {
+      const start = await api('/api/step_async', { months });
+      if (start.ok && start.job_id) {
+        while (true) {
+          const job = await api('/api/job?id=' + encodeURIComponent(start.job_id));
+          if (job.error) throw new Error(job.error);
+          if (job.status === 'error') throw new Error(job.error || 'Помилка симуляції');
+          if (job.status === 'done') {
+            DATA = job.overview;
+            await refresh();
+            toast(`Симуляція просунулась на ${months} міс. → ${DATA.date}`);
+            return;
+          }
+          toast(`Симуляція: ${job.done || 0} / ${job.total || months} міс…`);
+          await new Promise(r => setTimeout(r, 180));
+        }
+      }
+    }
     DATA = await api('/api/step', { months });
     await refresh();
     toast(`Симуляція просунулась на ${months} міс. → ${DATA.date}`);
+  } catch (err) {
+    toast(err?.message || 'Помилка кроку симуляції');
   } finally {
     document.querySelectorAll('.controls button').forEach(b => b.disabled = false);
   }
@@ -727,6 +760,12 @@ function updateMapLegend(mode) {
   };
   el.innerHTML = base + '<span>' + (legends[mode] || legends.political) + '</span>' + hint;
 }
+const _geoLayerCache = { canvas: document.createElement('canvas'), key: null };
+function _provLoyaltyColor(p) {
+  return p.loyalty >= 70 ? rgba(MAP_COLORS.verdigris, 0.62)
+    : (p.loyalty >= 45 ? rgba(MAP_COLORS.brass, 0.62)
+    : (p.loyalty >= 20 ? rgba(MAP_COLORS.slate, 0.60) : rgba(MAP_COLORS.oxblood, 0.72)));
+}
 function drawMap() {
   if (!DATA) return;
   const cv = document.getElementById('map');
@@ -741,9 +780,9 @@ function drawMap() {
   const ctx = cv.getContext('2d');
   ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
   ctx.fillStyle = '#04080e'; ctx.fillRect(0, 0, w, h);
-  ctx.save(); ctx.translate(view.x, view.y); ctx.scale(view.s, view.s);
 
   const mode = document.getElementById('map-mode')?.value || 'political';
+  const chkProvs = Boolean(document.getElementById('chk-provs')?.checked);
   updateMapLegend(mode);
   const warStates = new Set();
   for (const wr of DATA.wars) { wr.attackers.forEach(a => warStates.add(a.id)); wr.defenders.forEach(d => warStates.add(d.id)); }
@@ -757,51 +796,91 @@ function drawMap() {
     });
   }
   const maxGdp = Math.max(1, ...DATA.states.map(s => s.gdp || 0));
+  const provs = DATA.provinces || [];
+  const hasProvBodies = GEO.provBodies && Object.keys(GEO.provBodies).length > 0;
+  const stById = new Map(DATA.states.map(s => [s.id, s]));
 
-  // 1) Контури суші, держав, озер, річок, кордонів
+  // 1) Кешований базовий шар векторної географії (суша, держави, полігони провінцій, озера, річки, кордони)
   if (GEO.ready) {
-    ctx.fillStyle = rgba(MAP_COLORS.ink, 0.95);
-    for (const p of GEO.land) ctx.fill(p);
+    const cacheKey = `${w}|${h}|${dpr}|${mode}|${chkProvs}|${DATA.tick}|${DATA.map_version || ''}|${view.x.toFixed(2)}|${view.y.toFixed(2)}|${view.s.toFixed(4)}`;
+    if (_geoLayerCache.key !== cacheKey) {
+      const oc = _geoLayerCache.canvas;
+      if (oc.width !== cv.width || oc.height !== cv.height) { oc.width = cv.width; oc.height = cv.height; }
+      const octx = oc.getContext('2d');
+      octx.setTransform(dpr, 0, 0, dpr, 0, 0);
+      octx.clearRect(0, 0, w, h);
+      octx.save();
+      octx.translate(view.x, view.y);
+      octx.scale(view.s, view.s);
 
-    ctx.save();
-    for (const s of DATA.states) {
-      const sp = GEO.states[String(s.id)];
-      if (!sp) continue;
-      ctx.globalAlpha = mode === 'political' ? 0.56 : (mode === 'provinces' ? 0.30 : 0.85);
-      ctx.fillStyle = _stateHeatColor(s, warStates, epiStates, maxGdp, mode);
-      ctx.fill(sp);
+      octx.fillStyle = rgba(MAP_COLORS.ink, 0.95);
+      for (const p of GEO.land) octx.fill(p);
+
+      octx.save();
+      for (const s of DATA.states) {
+        const sp = GEO.states[String(s.id)];
+        if (!sp) continue;
+        octx.globalAlpha = mode === 'political' ? 0.56 : (mode === 'provinces' ? 0.28 : 0.85);
+        octx.fillStyle = _stateHeatColor(s, warStates, epiStates, maxGdp, mode);
+        octx.fill(sp);
+      }
+      octx.restore();
+
+      if (hasProvBodies) {
+        octx.save();
+        if (mode === 'provinces' || mode === 'loyalty') {
+          octx.globalAlpha = 0.78;
+          for (const p of provs) {
+            const pp = GEO.provBodies[String(p.id)];
+            if (!pp) continue;
+            octx.fillStyle = _provLoyaltyColor(p);
+            octx.fill(pp);
+          }
+        } else if (mode === 'political') {
+          octx.globalAlpha = 0.62;
+          for (const p of provs) {
+            if (p.occupied_by == null && p.state === p.core_state) continue;
+            const pp = GEO.provBodies[String(p.id)];
+            if (!pp) continue;
+            const owner = stById.get(p.occupied_by ?? p.state);
+            octx.fillStyle = (owner && owner.color) || p.color || rgba(MAP_COLORS.brass, 0.6);
+            octx.fill(pp);
+          }
+        }
+        octx.restore();
+      }
+
+      octx.fillStyle = '#060d16';
+      for (const p of GEO.lakes) octx.fill(p);
+
+      octx.strokeStyle = rgba(MAP_COLORS.slate, 0.55);
+      octx.lineWidth = 1.0 / view.s;
+      for (const p of GEO.rivers) octx.stroke(p);
+
+      if ((chkProvs || mode === 'provinces' || mode === 'loyalty') && GEO.provBorders?.length) {
+        octx.strokeStyle = (mode === 'provinces' || mode === 'loyalty') ? rgba(MAP_COLORS.brass, 0.45) : rgba(MAP_COLORS.parchment, 0.16);
+        octx.lineWidth = (mode === 'provinces' ? 0.9 : 0.6) / view.s;
+        for (const p of GEO.provBorders) octx.stroke(p);
+      }
+
+      octx.strokeStyle = rgba(MAP_COLORS.parchment, 0.26);
+      octx.lineWidth = 1.1 / view.s;
+      for (const p of GEO.borders) octx.stroke(p);
+      octx.restore();
+      _geoLayerCache.key = cacheKey;
     }
-    ctx.restore();
-
-    ctx.fillStyle = '#060d16';
-    for (const p of GEO.lakes) ctx.fill(p);
-
-    ctx.strokeStyle = rgba(MAP_COLORS.slate, 0.55);
-    ctx.lineWidth = 1.0 / view.s;
-    for (const p of GEO.rivers) ctx.stroke(p);
-
-    if ((document.getElementById('chk-provs')?.checked || mode === 'provinces' || mode === 'loyalty') && GEO.provBorders?.length) {
-      ctx.strokeStyle = (mode === 'provinces' || mode === 'loyalty') ? rgba(MAP_COLORS.brass, 0.45) : rgba(MAP_COLORS.parchment, 0.16);
-      ctx.lineWidth = (mode === 'provinces' ? 0.9 : 0.6) / view.s;
-      for (const p of GEO.provBorders) ctx.stroke(p);
-    }
-
-    ctx.strokeStyle = rgba(MAP_COLORS.parchment, 0.26);
-    ctx.lineWidth = 1.1 / view.s;
-    for (const p of GEO.borders) ctx.stroke(p);
+    ctx.drawImage(_geoLayerCache.canvas, 0, 0, w, h);
   }
 
-  const showProvs = mode === 'provinces' || document.getElementById('chk-provs')?.checked;
-  const provs = DATA.provinces || [];
-  const stById = new Map(DATA.states.map(s => [s.id, s]));
+  ctx.save(); ctx.translate(view.x, view.y); ctx.scale(view.s, view.s);
+
+  const showProvs = mode === 'provinces' || chkProvs;
   if ((mode === 'provinces' || mode === 'loyalty') && provs.length) {
     const pr = (mode === 'loyalty' ? 12 : 9.5) / Math.pow(view.s, 0.55);
     for (const p of provs) {
       if (p.x == null || p.y == null) continue;
-      const col = p.loyalty >= 70 ? rgba(MAP_COLORS.verdigris, 0.62)
-        : (p.loyalty >= 45 ? rgba(MAP_COLORS.brass, 0.62)
-        : (p.loyalty >= 20 ? rgba(MAP_COLORS.slate, 0.60) : rgba(MAP_COLORS.oxblood, 0.72)));
-      ctx.fillStyle = col;
+      if (hasProvBodies && GEO.provBodies[String(p.id)]) continue;
+      ctx.fillStyle = _provLoyaltyColor(p);
       ctx.beginPath(); ctx.arc(p.x, p.y, pr, 0, Math.PI * 2); ctx.fill();
       ctx.strokeStyle = p.color || rgba(MAP_COLORS.parchment, 0.4);
       ctx.lineWidth = 1.0 / view.s;
@@ -982,6 +1061,19 @@ function _findStateAtPoint(wx, wy) {
   ctx.restore();
   return hit;
 }
+function _findProvinceAtPoint(wx, wy) {
+  if (!GEO.ready || !GEO.provBodies) return null;
+  const cv = document.getElementById('map');
+  const ctx = cv.getContext('2d');
+  ctx.save();
+  ctx.setTransform(1, 0, 0, 1, 0, 0);
+  let hit = null;
+  for (const [pid, p] of Object.entries(GEO.provBodies)) {
+    if (ctx.isPointInPath(p, wx, wy)) { hit = Number(pid); break; }
+  }
+  ctx.restore();
+  return hit;
+}
 function placeMapTip(tip, mx, my) {
   // Тримаємо підказку всередині карти: інакше вона обрізається overflow:hidden.
   const wrap = tip.parentElement;
@@ -1000,13 +1092,13 @@ function initMapEvents() {
     const ns = Math.max(0.25, Math.min(12, view.s * f));
     view.x = mx - (mx - view.x) * (ns / view.s);
     view.y = my - (my - view.y) * (ns / view.s);
-    view.s = ns; drawMap();
+    view.s = ns; scheduleDrawMap();
   }, { passive: false });
   cv.addEventListener('mousedown', e => { drag = { x: e.clientX - view.x, y: e.clientY - view.y, moved: false }; });
   window.addEventListener('mouseup', () => { drag = null; });
   cv.addEventListener('mousemove', e => {
     const rc = cv.getBoundingClientRect(), mx = e.clientX - rc.left, my = e.clientY - rc.top;
-    if (drag) { drag.moved = true; view.x = e.clientX - drag.x; view.y = e.clientY - drag.y; drawMap(); tip.style.display='none'; return; }
+    if (drag) { drag.moved = true; view.x = e.clientX - drag.x; view.y = e.clientY - drag.y; scheduleDrawMap(); tip.style.display='none'; return; }
     if (!DATA) return;
     const wx = (mx - view.x) / view.s, wy = (my - view.y) / view.s;
     const mode = document.getElementById('map-mode')?.value || 'political';
@@ -1017,6 +1109,10 @@ function initMapEvents() {
         if (p.x == null || p.y == null) continue;
         const d = (p.x - wx)**2 + (p.y - wy)**2;
         if (d < bp) { bp = d; bestP = p; }
+      }
+      if (!bestP) {
+        const hitPid = _findProvinceAtPoint(wx, wy);
+        if (hitPid != null) bestP = provs.find(p => p.id === hitPid) || null;
       }
       if (bestP) {
         const flag = bestP.occupied_by != null ? ' · 🚩 Окуповано' : (bestP.siege > 0 ? ` · ⚔ Облога ${bestP.siege}%` : '');
@@ -1069,6 +1165,10 @@ function initMapEvents() {
         if (p.x == null || p.y == null) continue;
         const d = (p.x - wx)**2 + (p.y - wy)**2;
         if (d < bp) { bp = d; bestP = p; }
+      }
+      if (!bestP) {
+        const hitPid = _findProvinceAtPoint(wx, wy);
+        if (hitPid != null) bestP = provs.find(p => p.id === hitPid) || null;
       }
       if (bestP) { openProvince(bestP.id); return; }
     }

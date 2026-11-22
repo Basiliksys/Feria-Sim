@@ -18,7 +18,7 @@ import os
 import random
 import re
 
-from . import geography as GT, lore_data as LD
+from . import _accel as AC, geography as GT, lore_data as LD
 
 BULK_RATE = 100.0   # од. сировини на 1000 селян/міс при biomeOutput = 1
 POINT_RATE = 18.0   # од. на 1000 селян/міс для «точкових» ресурсів клітинки
@@ -1101,15 +1101,13 @@ def import_map(path):
 
 
 def _write_json_safe(obj, path, *, compact=False):
-    """Атомарний JSON-запис: allow_nan=False і очищення tmp при будь-якій помилці."""
+    """Атомарний JSON-запис: allow_nan=False і очищення tmp при будь-якій помиці."""
     os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
     tmp = path + ".tmp"
-    kw = dict(ensure_ascii=False, allow_nan=False)
-    if compact:
-        kw["separators"] = (",", ":")
     try:
-        with open(tmp, "w", encoding="utf-8") as f:
-            json.dump(obj, f, **kw)
+        raw = AC.json_dumps_bytes(obj, allow_nan=False, compact=compact, non_str_keys=True)
+        with open(tmp, "wb") as f:
+            f.write(raw)
         os.replace(tmp, path)
     except BaseException:
         try:
@@ -1131,6 +1129,7 @@ _RE_PATH = re.compile(r"<path\b([^>]*)/?>")
 _RE_ATTR_D = re.compile(r'\bd="([^"]+)"')
 _RE_ATTR_ID = re.compile(r'\bid="([^"]+)"')
 _RE_ATTR_DF = re.compile(r'\bdata-f="(\d+)"')
+_RE_SVG_TOK = re.compile(r"[MmLlZz]|-?\d+(?:\.\d+)?")
 
 
 def _round_svg_path(d):
@@ -1139,7 +1138,7 @@ def _round_svg_path(d):
 
 def _svg_group_content(text, group_id):
     m = re.search(rf'<g\b[^>]*\bid=["\']{re.escape(group_id)}["\'][^>]*>', text)
-    if not m:
+    if not m or m.group(0).rstrip().endswith("/>"):
         return ""
     pos = m.end()
     depth = 1
@@ -1154,6 +1153,229 @@ def _svg_group_content(text, group_id):
                 depth += 1
     end = text.find("</g>", pos)
     return text[pos:end] if end != -1 else ""
+
+
+def _extract_outer_svg(text):
+    m0 = re.search(r"<svg\b", text)
+    if not m0:
+        return ""
+    pos = m0.start()
+    depth = 0
+    for tm in re.finditer(r"<(/?)svg\b", text[pos:]):
+        depth += -1 if tm.group(1) == "/" else 1
+        if depth == 0:
+            gt = text.find(">", pos + tm.end())
+            if gt != -1:
+                return text[pos:gt + 1]
+            break
+    end = text.rfind("</svg>")
+    return text[pos:end + 6] if end > pos else ""
+
+
+def _extract_svg_groups_lxml(text, wanted_ids):
+    """Швидкий DOM-розбір SVG через lxml; повертає {gid: [elem_dict, ...]} або None."""
+    if not AC.HAS_LXML:
+        return None
+    svg_str = _extract_outer_svg(text)
+    if not svg_str:
+        return None
+    try:
+        parser = AC._lxml_etree.XMLParser(huge_tree=True, recover=True)
+        root = AC._lxml_etree.fromstring(svg_str.encode("utf-8"), parser=parser)
+    except Exception:
+        return None
+    if root is None:
+        return None
+    groups = {gid: [] for gid in wanted_ids}
+    wanted = set(wanted_ids)
+    land_mask_ids = set()
+    for el in root.iter():
+        tag = el.tag.rsplit("}", 1)[-1]
+        if tag == "g":
+            gid = el.get("id")
+            if gid in wanted:
+                lst = groups[gid]
+                for child in el.iter():
+                    if child.tag.rsplit("}", 1)[-1] == "path":
+                        d = child.get("d")
+                        if d:
+                            lst.append(dict(d=d, id=child.get("id") or "", df=child.get("data-f") or ""))
+        elif tag == "mask" and el.get("id") == "land":
+            txt = AC._lxml_etree.tostring(el, encoding="unicode")
+            land_mask_ids = {int(x) for x in re.findall(r"feature_(\d+)", txt)}
+    return groups, land_mask_ids
+
+
+def _svg_subpaths(d, closed_only=False):
+    toks = _RE_SVG_TOK.findall(d or "")
+    paths, cur, cmd = [], [], "M"
+    i = 0
+    n = len(toks)
+    while i < n:
+        t = toks[i]
+        if t in ("M", "m", "L", "l", "Z", "z"):
+            cmd = t
+            if cmd in ("Z", "z"):
+                if len(cur) >= 3:
+                    if cur[0] != cur[-1]:
+                        cur.append(cur[0])
+                    paths.append((cur, True))
+                cur = []
+            elif cmd in ("M", "m") and cur:
+                paths.append((cur, False))
+                cur = []
+            i += 1
+        elif i + 1 < n:
+            x = float(t)
+            y = float(toks[i + 1])
+            i += 2
+            if cmd in ("m", "l") and cur:
+                x += cur[-1][0]
+                y += cur[-1][1]
+            cur.append((x, y))
+            if cmd == "m":
+                cmd = "l"
+            elif cmd == "M":
+                cmd = "L"
+        else:
+            break
+    if cur:
+        paths.append((cur, len(cur) >= 3 and cur[0] == cur[-1]))
+    return [p for p, cl in paths if (not closed_only or cl) and len(p) >= 2]
+
+
+def _geom_to_svg_path(geom, tol=0.4):
+    if geom is None or geom.is_empty:
+        return ""
+    try:
+        if tol > 0:
+            geom = geom.simplify(tol, preserve_topology=True)
+    except Exception:
+        pass
+    parts = []
+    stack = [geom]
+    while stack:
+        g = stack.pop()
+        gt = g.geom_type
+        if gt == "Polygon":
+            if g.is_empty:
+                continue
+            ext = list(g.exterior.coords)
+            if len(ext) >= 4:
+                parts.append("M" + " ".join(f"{x:.1f},{y:.1f}" for x, y in ext[:-1]) + "Z")
+            for hole in g.interiors:
+                hc = list(hole.coords)
+                if len(hc) >= 4:
+                    parts.append("M" + " ".join(f"{x:.1f},{y:.1f}" for x, y in hc[:-1]) + "Z")
+        elif gt in ("MultiPolygon", "GeometryCollection"):
+            stack.extend(g.geoms)
+    return " ".join(parts)
+
+
+def _build_province_bodies(world, states_paths, prov_borders):
+    """Відновлює точні полігони провінцій {pid_str: svg_path} через shapely."""
+    if not AC.HAS_SHAPELY or not states_paths or not world.get("provinces"):
+        return {}
+    Polygon = AC._Polygon
+    LineString = AC._LineString
+    Point = AC._Point
+    polygonize = AC._polygonize
+    unary_union = AC._unary_union
+    voronoi_polygons = getattr(AC._shapely, "voronoi_polygons", None)
+    MultiPoint = getattr(AC._shapely, "MultiPoint", None)
+
+    state_geoms = {}
+    for sid_s, d_str in states_paths.items():
+        if not str(sid_s).isdigit():
+            continue
+        sid = int(sid_s)
+        polys = []
+        for pts in _svg_subpaths(d_str, closed_only=True):
+            if len(pts) >= 4:
+                try:
+                    p = Polygon(pts)
+                    if not p.is_valid:
+                        p = p.buffer(0)
+                    if not p.is_empty and p.area > 0.5:
+                        polys.append(p)
+                except Exception:
+                    continue
+        if polys:
+            state_geoms[sid] = unary_union(polys) if len(polys) > 1 else polys[0]
+
+    prov_lines = []
+    for d_str in prov_borders:
+        for pts in _svg_subpaths(d_str, closed_only=False):
+            if len(pts) >= 2:
+                try:
+                    prov_lines.append(LineString(pts))
+                except Exception:
+                    continue
+    prov_ml = unary_union(prov_lines) if prov_lines else None
+
+    by_state_provs = collections.defaultdict(list)
+    burgs = world.get("burgs") or {}
+    for pid, pr in (world.get("provinces") or {}).items():
+        if isinstance(pr, dict):
+            by_state_provs[pr.get("state")].append(pr)
+
+    prov_geoms = {}
+    for sid, sgeom in state_geoms.items():
+        prs = by_state_provs.get(sid, [])
+        if not prs:
+            continue
+        if len(prs) == 1 or prov_ml is None:
+            if len(prs) == 1:
+                prov_geoms[prs[0]["id"]] = sgeom
+                continue
+        anchors = []
+        for pr in prs:
+            pole = pr.get("pole")
+            cb = burgs.get(pr.get("burg"))
+            pt = Point(pole[0], pole[1]) if (isinstance(pole, (list, tuple)) and len(pole) >= 2) \
+                else (Point(cb["x"], cb["y"]) if cb else None)
+            if pt is not None:
+                anchors.append((pr["id"], pt))
+        try:
+            if prov_ml is not None:
+                clipped = prov_ml.intersection(sgeom.buffer(0.2))
+                noded = unary_union([sgeom.boundary, clipped])
+                pieces = [p for p in polygonize(noded) if p.area > 0.5 and sgeom.contains(p.representative_point())]
+            else:
+                pieces = [sgeom]
+        except Exception:
+            pieces = [sgeom]
+        if not pieces:
+            pieces = [sgeom]
+        for piece in pieces:
+            hits = [(pid, pt) for pid, pt in anchors if piece.contains(pt)]
+            if len(hits) == 1:
+                pid = hits[0][0]
+                prov_geoms[pid] = unary_union([prov_geoms[pid], piece]) if pid in prov_geoms else piece
+            elif len(hits) > 1 and voronoi_polygons is not None and MultiPoint is not None:
+                try:
+                    vp = voronoi_polygons(MultiPoint([pt for _, pt in hits]), extend_to=piece.envelope.buffer(5.0))
+                    for cell in vp.geoms:
+                        sub = cell.intersection(piece)
+                        if sub.is_empty or sub.area <= 0.2:
+                            continue
+                        sub_hits = [pid for pid, pt in hits if cell.contains(pt) or sub.contains(pt)]
+                        pid = sub_hits[0] if sub_hits else min(hits, key=lambda kv: kv[1].distance(sub.representative_point()))[0]
+                        prov_geoms[pid] = unary_union([prov_geoms[pid], sub]) if pid in prov_geoms else sub
+                except Exception:
+                    pid = hits[0][0]
+                    prov_geoms[pid] = unary_union([prov_geoms[pid], piece]) if pid in prov_geoms else piece
+            elif anchors:
+                rp = piece.representative_point()
+                pid = min(anchors, key=lambda kv: kv[1].distance(rp))[0]
+                prov_geoms[pid] = unary_union([prov_geoms[pid], piece]) if pid in prov_geoms else piece
+
+    out = {}
+    for pid, geom in prov_geoms.items():
+        d_str = _geom_to_svg_path(geom)
+        if d_str:
+            out[str(pid)] = d_str
+    return out
 
 
 def _convex_hull(pts):
@@ -1219,7 +1441,7 @@ def _extract_feat_types(text):
 
 
 def extract_map_geometry(text_or_path, world):
-    """Витягує векторні SVG-контури (суша, озера, держави, кордони, річки) або будує фолбек по містах."""
+    """Витягує векторні SVG-контури (суша, озера, держави, провінції, кордони, річки) або будує фолбек по містах."""
     if os.path.exists(text_or_path):
         text = read_map_text(text_or_path)
     else:
@@ -1234,29 +1456,23 @@ def extract_map_geometry(text_or_path, world):
 
     if "<svg" in text and not text.lstrip().startswith("{"):
         feat = _extract_feat_types(text)
-        # fallback за <mask id="land"> якщо features JSON не знайдено
-        land_mask_ids = set()
-        if not feat:
-            mask_m = _svg_group_content(text, "defs") or text
-            lm = re.search(r'<mask\b[^>]*\bid=["\']land["\'][^>]*>(.*?)</mask>', mask_m, re.S)
-            if lm:
-                land_mask_ids = {int(x) for x in re.findall(r'feature_(\d+)', lm.group(1))}
-
-        fp = _svg_group_content(text, "featurePaths")
-        if fp:
-            for m in _RE_PATH.finditer(fp):
-                attrs = m.group(1)
-                dm = _RE_ATTR_D.search(attrs)
-                if not dm:
+        parsed = _extract_svg_groups_lxml(
+            text, ("featurePaths", "statesBody", "stateBorders", "provinceBorders", "rivers")
+        )
+        if parsed is not None:
+            groups, land_mask_ids = parsed
+            for el in groups.get("featurePaths", ()):
+                d = _round_svg_path(el["d"])
+                if not d:
                     continue
-                d = _round_svg_path(dm.group(1))
-                idm = _RE_ATTR_ID.search(attrs)
-                dfm = _RE_ATTR_DF.search(attrs)
                 fid = None
-                if idm and idm.group(1).startswith("feature_"):
-                    fid = int(idm.group(1).split("_", 1)[1])
-                elif dfm:
-                    fid = int(dfm.group(1))
+                if el["id"].startswith("feature_"):
+                    try:
+                        fid = int(el["id"].split("_", 1)[1])
+                    except ValueError:
+                        fid = None
+                elif el["df"].isdigit():
+                    fid = int(el["df"])
                 if fid is not None and feat:
                     info = feat.get(fid, {})
                     if info.get("land"):
@@ -1265,48 +1481,101 @@ def extract_map_geometry(text_or_path, world):
                         lakes.append(d)
                 elif fid is not None and fid in land_mask_ids:
                     land.append(d)
-
-        sb = _svg_group_content(text, "statesBody")
-        if sb:
-            for m in _RE_PATH.finditer(sb):
-                attrs = m.group(1)
-                idm = _RE_ATTR_ID.search(attrs)
-                if not idm:
-                    continue
-                pid = idm.group(1)
+            for el in groups.get("statesBody", ()):
+                pid = el["id"]
                 if not pid.startswith("state") or pid.startswith("state-gap"):
                     continue
                 sid_str = pid[5:]
                 if not sid_str.isdigit():
                     continue
-                dm = _RE_ATTR_D.search(attrs)
-                if dm:
+                d = _round_svg_path(el["d"])
+                if d:
+                    states_paths[sid_str] = (states_paths[sid_str] + " " + d) if sid_str in states_paths else d
+            for el in groups.get("stateBorders", ()):
+                d = _round_svg_path(el["d"])
+                if d:
+                    borders.append(d)
+            for el in groups.get("provinceBorders", ()):
+                d = _round_svg_path(el["d"])
+                if d:
+                    prov_borders.append(d)
+            for el in groups.get("rivers", ()):
+                d = _round_svg_path(el["d"])
+                if d:
+                    rivers.append(d)
+        else:
+            land_mask_ids = set()
+            if not feat:
+                mask_m = _svg_group_content(text, "defs") or text
+                lm = re.search(r'<mask\b[^>]*\bid=["\']land["\'][^>]*>(.*?)</mask>', mask_m, re.S)
+                if lm:
+                    land_mask_ids = {int(x) for x in re.findall(r'feature_(\d+)', lm.group(1))}
+
+            fp = _svg_group_content(text, "featurePaths")
+            if fp:
+                for m in _RE_PATH.finditer(fp):
+                    attrs = m.group(1)
+                    dm = _RE_ATTR_D.search(attrs)
+                    if not dm:
+                        continue
                     d = _round_svg_path(dm.group(1))
-                    if sid_str in states_paths:
-                        states_paths[sid_str] += " " + d
-                    else:
-                        states_paths[sid_str] = d
+                    idm = _RE_ATTR_ID.search(attrs)
+                    dfm = _RE_ATTR_DF.search(attrs)
+                    fid = None
+                    if idm and idm.group(1).startswith("feature_"):
+                        fid = int(idm.group(1).split("_", 1)[1])
+                    elif dfm:
+                        fid = int(dfm.group(1))
+                    if fid is not None and feat:
+                        info = feat.get(fid, {})
+                        if info.get("land"):
+                            land.append(d)
+                        elif info.get("type") == "lake":
+                            lakes.append(d)
+                    elif fid is not None and fid in land_mask_ids:
+                        land.append(d)
 
-        br = _svg_group_content(text, "stateBorders")
-        if br:
-            for m in _RE_PATH.finditer(br):
-                dm = _RE_ATTR_D.search(m.group(1))
-                if dm:
-                    borders.append(_round_svg_path(dm.group(1)))
+            sb = _svg_group_content(text, "statesBody")
+            if sb:
+                for m in _RE_PATH.finditer(sb):
+                    attrs = m.group(1)
+                    idm = _RE_ATTR_ID.search(attrs)
+                    if not idm:
+                        continue
+                    pid = idm.group(1)
+                    if not pid.startswith("state") or pid.startswith("state-gap"):
+                        continue
+                    sid_str = pid[5:]
+                    if not sid_str.isdigit():
+                        continue
+                    dm = _RE_ATTR_D.search(attrs)
+                    if dm:
+                        d = _round_svg_path(dm.group(1))
+                        if sid_str in states_paths:
+                            states_paths[sid_str] += " " + d
+                        else:
+                            states_paths[sid_str] = d
 
-        pbr = _svg_group_content(text, "provinceBorders")
-        if pbr:
-            for m in _RE_PATH.finditer(pbr):
-                dm = _RE_ATTR_D.search(m.group(1))
-                if dm:
-                    prov_borders.append(_round_svg_path(dm.group(1)))
+            br = _svg_group_content(text, "stateBorders")
+            if br:
+                for m in _RE_PATH.finditer(br):
+                    dm = _RE_ATTR_D.search(m.group(1))
+                    if dm:
+                        borders.append(_round_svg_path(dm.group(1)))
 
-        rv = _svg_group_content(text, "rivers")
-        if rv:
-            for m in _RE_PATH.finditer(rv):
-                dm = _RE_ATTR_D.search(m.group(1))
-                if dm:
-                    rivers.append(_round_svg_path(dm.group(1)))
+            pbr = _svg_group_content(text, "provinceBorders")
+            if pbr:
+                for m in _RE_PATH.finditer(pbr):
+                    dm = _RE_ATTR_D.search(m.group(1))
+                    if dm:
+                        prov_borders.append(_round_svg_path(dm.group(1)))
+
+            rv = _svg_group_content(text, "rivers")
+            if rv:
+                for m in _RE_PATH.finditer(rv):
+                    dm = _RE_ATTR_D.search(m.group(1))
+                    if dm:
+                        rivers.append(_round_svg_path(dm.group(1)))
 
     # Фолбек для карт без SVG (JSON-експорт або синтетичні тести)
     if not states_paths:
@@ -1325,9 +1594,12 @@ def extract_map_geometry(text_or_path, world):
             if p_land:
                 land.append(p_land)
 
+    prov_bodies = _build_province_bodies(world, states_paths, prov_borders)
+
     return dict(
         width=width, height=height,
-        land=land, lakes=lakes, states=states_paths, borders=borders, prov_borders=prov_borders, rivers=rivers,
+        land=land, lakes=lakes, states=states_paths, borders=borders,
+        prov_borders=prov_borders, prov_bodies=prov_bodies, rivers=rivers,
         has_svg=bool(land or states_paths),
     )
 
@@ -1337,5 +1609,5 @@ def save_map_geo(geo, path):
 
 
 def load_map_geo(path):
-    with open(path, encoding="utf-8") as f:
-        return json.load(f)
+    with open(path, "rb") as f:
+        return AC.json_loads(f.read())
