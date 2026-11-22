@@ -18,7 +18,7 @@ import os
 import random
 import re
 
-from . import _accel as AC, geography as GT, lore_data as LD
+from . import _accel as AC, geography as GT, lore_data as LD, routes as RT
 
 BULK_RATE = 100.0   # од. сировини на 1000 селян/міс при biomeOutput = 1
 POINT_RATE = 18.0   # од. на 1000 селян/міс для «точкових» ресурсів клітинки
@@ -355,7 +355,7 @@ def _parse_multiline_map(text, source_name):
     c_prov = _cell_arr(11, ncells)
 
     # Скануємо решту JSON/CSV секцій після pack.cells
-    religions = provinces_raw = markers_raw = campaigns_raw = None
+    religions = provinces_raw = markers_raw = campaigns_raw = routes_raw = None
     goods_raw = markets_raw = trade_raw = None
     goods_idx = trade_idx = None
     if rel_idx is not None:
@@ -372,6 +372,8 @@ def _parse_multiline_map(text, source_name):
                 provinces_raw = obj
             elif markers_raw is None and ("type" in first and "x" in first and "y" in first and "icon" in first):
                 markers_raw = obj
+            elif routes_raw is None and ("group" in first and "points" in first):
+                routes_raw = obj
             elif campaigns_raw is None and ("cells" in first and "type" in first and "name" in first and "land" not in first):
                 campaigns_raw = obj
             elif goods_raw is None and ("demandCoverage" in first or "biomeOutput" in first):
@@ -396,6 +398,7 @@ def _parse_multiline_map(text, source_name):
         features=features, cultures=cultures, states_raw=states_raw, burgs_raw=burgs_raw,
         religions=religions or [{"i": 0, "name": "No religion"}],
         provinces_raw=provinces_raw or [0], markers_raw=markers_raw or [], campaigns_raw=campaigns_raw or [],
+        routes_raw=routes_raw or [],
         c_biome=c_biome, c_burg=c_burg, c_culture=c_culture, c_state=c_state, c_rel=c_rel, c_prov=c_prov,
         goods_raw=goods_raw, markets_raw=markets_raw, trade_raw=trade_raw, c_goods=c_goods, c_market=c_market,
     )
@@ -436,6 +439,7 @@ def _parse_fmg_json(data, source_name):
         states_raw=pack.get("states") or [], burgs_raw=pack.get("burgs") or [{}],
         religions=pack.get("religions") or [{"i": 0, "name": "No religion"}],
         provinces_raw=pack.get("provinces") or [0], markers_raw=pack.get("markers") or [], campaigns_raw=[],
+        routes_raw=pack.get("routes") or [],
         c_biome=cells.get("biome") or [], c_burg=cells.get("burg") or [], c_culture=cells.get("culture") or [],
         c_state=cells.get("state") or [], c_rel=cells.get("religion") or [], c_prov=cells.get("province") or [],
         goods_raw=pack.get("goods"), markets_raw=pack.get("markets"), trade_raw=pack.get("trade"),
@@ -879,7 +883,7 @@ def import_map(path):
         if b["rural"] <= 0:
             b["rural"] = b["pop"] * 2.0
 
-    # ---------------- торгові лінки між ринками
+    # ---------------- торгові лінки між ринками (планарна географічна мережа + трасування доріг)
     pair_units = collections.Counter()
     if not isinstance(trade_raw, (list, tuple)):
         trade_raw = []
@@ -891,50 +895,11 @@ def import_map(path):
         if a_m is None or b_m is None or a_m not in markets or b_m not in markets or a_m == b_m:
             continue
         pair_units[tuple(sorted((a_m, b_m)))] += _num(t.get("units"), 10.0, 0.0, 1e9)
-    adj = collections.defaultdict(set)
-    for a, b in pair_units:
-        adj[a].add(b)
-        adj[b].add(a)
-
-    def comps():
-        seen, out = set(), []
-        for m in markets:
-            if m in seen:
-                continue
-            comp, st = set(), [m]
-            while st:
-                x = st.pop()
-                if x in comp:
-                    continue
-                comp.add(x)
-                st.extend(adj[x])
-            seen |= comp
-            out.append(comp)
-        return out
-
-    cs = comps()
-    while len(cs) > 1:
-        a, rest = cs[0], cs[1:]
-        best = None
-        for m1 in a:
-            for c in rest:
-                for m2 in c:
-                    d = _dist((mk_center[m1]["x"], mk_center[m1]["y"]), (mk_center[m2]["x"], mk_center[m2]["y"]))
-                    if best is None or d < best[0]:
-                        best = (d, m1, m2)
-        _, m1, m2 = best
-        adj[m1].add(m2)
-        adj[m2].add(m1)
-        pair_units[tuple(sorted((m1, m2)))] += 1
-        cs = comps()
 
     dist_scale = _num(units.get("distance", {}).get("scale"), 3.0, 1e-6, 1000.0)
-    edges = []
-    for (a, b), u in pair_units.items():
-        ca, cb = mk_center[a], mk_center[b]
-        d = _dist((ca["x"], ca["y"]), (cb["x"], cb["y"])) * dist_scale
-        sea = (ca["feature"] != cb["feature"]) or (ca["port"] and cb["port"] and d > 150)
-        edges.append(dict(a=a, b=b, dist=round(d, 1), cap=round(u, 2), sea=bool(sea)))
+    edges = RT.build_geographic_edges(
+        markets, mk_center, pair_units, parsed.get("routes_raw") or [], dist_scale
+    )
     for ei, e in enumerate(edges):
         markets[e["a"]]["edges"].append(ei)
         markets[e["b"]]["edges"].append(ei)

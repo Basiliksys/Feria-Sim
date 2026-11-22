@@ -214,7 +214,8 @@ class Sim:
         self.edges = w["edges"]
         from . import geography as GT, routes as RT
         self.geography = GT.ensure_geography(w)
-        self.routes_by_id = RT.ensure_highways(self)
+        upgraded = RT.upgrade_legacy_edges(self)
+        self.routes_by_id = RT.ensure_highways(self, rebuild=upgraded)
         cars = w.get("caravans")
         raw_cars = cars if isinstance(cars, list) else []
         self.caravans = [c for c in (_normalize_caravan(x, self.goods, self.markets) for x in raw_cars) if c is not None]
@@ -750,11 +751,15 @@ class Sim:
                     tariff = f
             # runtime-модифікатори торгівлі від politics/events (відсутні = 1.0)
             tmult *= self.state_mult(sa, "trade_mod", 1.0) * self.state_mult(sb, "trade_mod", 1.0)
+            ekind = e.get("kind") or ("sea" if e.get("sea") else "trail")
+            cap_k = 1.20 if ekind == "road" else (0.45 if ekind == "prospective" else 1.0)
+            tmult *= cap_k
             moved_edge = 0.0
             if tmult > 0.001:
                 seaf = 0.45 if e["sea"] else 1.0
+                cost_k = 0.78 if ekind == "road" else (1.40 if ekind == "prospective" else 1.0)
                 dist = max(0.0, _finite(e.get("dist"), 0.0))
-                dist_rate = rate * (dist / 100.0) * seaf
+                dist_rate = rate * (dist / 100.0) * seaf * cost_k
                 food_loss = clamp(0.01 + 0.02 * (dist / 300.0), 0.0, 0.25)
                 flow_mult = clamp(tmult, 0.0, 3.0)
                 sqrt_bulk = self._good_sqrt_bulk

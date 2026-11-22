@@ -60,7 +60,7 @@ python -m feria_sim serve --no-browser
 | `data/special_goods.json` | Каталог 12 регіональних спецтоварів (`id` 101..112) із прив'язкою до поясів/біомів/портів/річок | Підключається при `worldgen` |
 | `pyproject.toml` | Метадані пакета `feria-sim`, групи опціональних залежностей (`[fast]`, `[geo]`, `[web]`, `[dev]`, `[all]`), налаштування `pytest` і `ruff` | Працює і з `pip install -e .[all]`, і без нього |
 | `.agents/skills/` | Локальні скіли для ШІ-агентів: `feria-context-sync`, `feria-perf-balance`, `feria-ui-canvas` (зі скриптами звірки й бенчмарку) | Автоматично підхоплюються агентами |
-| `tests/test_feria_sim.py` | Регресійні та інтеграційні тести (`TestFeriaSim`: 30 тестів) | Орієнтир усіх контрактів (`unittest` / `pytest`) |
+| `tests/test_feria_sim.py` | Регресійні та інтеграційні тести (`TestFeriaSim`: 31 тест) | Орієнтир усіх контрактів (`unittest` / `pytest`) |
 
 Некомічені робочі директорії (у `.gitignore`): `save/` (`world.json`, `map_geo.json`, `journal.jsonl`, `maps/`, `slots/`, `undo/`).
 

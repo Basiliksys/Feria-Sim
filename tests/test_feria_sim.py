@@ -1346,6 +1346,66 @@ class TestFeriaSim(unittest.TestCase):
                 srv.shutdown()
                 srv.server_close()
 
+    def test_geographic_edges_and_prospective_road_build(self):
+        """Торгові потоки будуються планарно, трасують pack.routes і підтримують будівництво доріг."""
+        markets = {1: {"id": 1, "burgs": [1]}, 2: {"id": 2, "burgs": [2]}, 3: {"id": 3, "burgs": [3]}}
+        mk_center = {
+            1: {"x": 100.0, "y": 200.0, "feature": 1, "port": False, "pop": 5000, "rural": 8000},
+            2: {"x": 300.0, "y": 200.0, "feature": 1, "port": False, "pop": 6000, "rural": 9000},
+            3: {"x": 500.0, "y": 200.0, "feature": 1, "port": False, "pop": 5500, "rural": 8500},
+        }
+        # Пара (1, 3) проходить крізь ринок 2 — планарний граф Габріеля має прибрати пряму хорду (1, 3).
+        pair_units = {(1, 2): 25.0, (2, 3): 15.0, (1, 3): 40.0}
+        routes_raw = [
+            {"i": 0, "group": "roads", "points": [[100, 200, 0], [200, 235, 1], [300, 200, 2]]},
+            {"i": 1, "group": "trails", "points": [[300, 200, 2], [400, 175, 3], [500, 200, 4]]},
+        ]
+        edges = RT.build_geographic_edges(markets, mk_center, pair_units, routes_raw=routes_raw, dist_scale=2.0)
+        pairs = {(e["a"], e["b"]): e for e in edges}
+        self.assertEqual(set(pairs), {(1, 2), (2, 3)})
+        self.assertEqual(pairs[(1, 2)]["kind"], "road")
+        self.assertGreaterEqual(len(pairs[(1, 2)]["pts"]), 3)
+        self.assertEqual(pairs[(2, 3)]["kind"], "trail")
+
+        with tempfile.TemporaryDirectory() as td:
+            _, wpath, jpath, _, sim = _build_calibrated_test_world(td, seed=21)
+            # Створюємо три ринки й тестуємо апгрейд застарілих хорд + рекомендації доріг
+            sim.edges = [{"a": 1, "b": 2, "dist": 120.0, "cap": 10.0, "sea": False, "flow": 55.0}]
+            self.assertTrue(RT.upgrade_legacy_edges(sim))
+            self.assertEqual(sim.edges[0]["flow"], 55.0)
+            self.assertIn("kind", sim.edges[0])
+            self.assertIn("pts", sim.edges[0])
+            sim.edges[0]["kind"] = "prospective"
+
+            recs = RT.recommend_roads(sim, limit=5)
+            self.assertTrue(recs)
+            target_idx = recs[0]["edge_index"]
+            prev_kind = sim.edges[target_idx]["kind"]
+
+            E.save_world(sim.w, wpath)
+            app = web.AppState(wpath, jpath)
+            srv = web.ThreadingHTTPServer(("127.0.0.1", 0), web.make_handler(app))
+            t = threading.Thread(target=srv.serve_forever, daemon=True)
+            t.start()
+            try:
+                base = f"http://127.0.0.1:{srv.server_port}"
+                req = urllib.request.Request(
+                    base + "/api/build_road",
+                    data=json.dumps({"edge_index": target_idx}).encode("utf-8"),
+                    headers={"Content-Type": "application/json"},
+                    method="POST",
+                )
+                with urllib.request.urlopen(req, timeout=5) as r:
+                    res = json.loads(r.read().decode("utf-8"))
+                self.assertTrue(res["ok"])
+                self.assertEqual(app.sim.edges[target_idx]["kind"], "road")
+                undo = app.undo()
+                self.assertTrue(undo["ok"])
+                self.assertEqual(app.sim.edges[target_idx]["kind"], prev_kind)
+            finally:
+                srv.shutdown()
+                srv.server_close()
+
 
 if __name__ == "__main__":
     unittest.main()

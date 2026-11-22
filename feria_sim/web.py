@@ -25,6 +25,7 @@ from . import worldgen as WG
 from . import politics as PO
 from . import events as EV
 from . import report as RP
+from . import routes as RT
 from . import dnd_tools as DT
 
 UI_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "ui.html")
@@ -364,12 +365,18 @@ class AppState:
                 sat_food=round(float((b.get("sat") or {}).get("food", 1.0)), 3),
             ) for b in sim.burgs.values()]
             edges_out = [dict(
+                id=ei,
                 a=e["a"], b=e["b"], sea=e["sea"], flow=e.get("flow", 0), dist=e["dist"],
+                kind=e.get("kind") or ("sea" if e["sea"] else "trail"),
+                pts=e.get("pts") or [
+                    [sim.burgs[sim.markets[e["a"]]["center"]]["x"], sim.burgs[sim.markets[e["a"]]["center"]]["y"]],
+                    [sim.burgs[sim.markets[e["b"]]["center"]]["x"], sim.burgs[sim.markets[e["b"]]["center"]]["y"]],
+                ],
                 ax=sim.burgs[sim.markets[e["a"]]["center"]]["x"],
                 ay=sim.burgs[sim.markets[e["a"]]["center"]]["y"],
                 bx=sim.burgs[sim.markets[e["b"]]["center"]]["x"],
                 by=sim.burgs[sim.markets[e["b"]]["center"]]["y"],
-            ) for e in sim.edges]
+            ) for ei, e in enumerate(sim.edges)]
             caravans_out = []
             for c in w.get("caravans", []):
                 if not isinstance(c, dict):
@@ -496,6 +503,7 @@ class AppState:
                     special_goods_enabled=bool(w.get("config", {}).get("special_goods_enabled", True)),
                 ),
                 caravans=caravans_out, trade_routes=routes_out,
+                prospective_roads=RT.recommend_roads(sim, limit=10),
                 wars=wars_out, active_events=events_active, epidemics=epidemics,
                 markers=markers, crusade=crusade_out, event_defs=event_defs,
                 journal=w["journal"][-60:][::-1],
@@ -1311,6 +1319,28 @@ class AppState:
             RP.write_all(self.sim, self.vault)
             return dict(ok=True, message="Нотатки Obsidian оновлено")
 
+    def build_road(self, edge_index):
+        with self.lock:
+            try:
+                idx = int(edge_index)
+            except (TypeError, ValueError):
+                return dict(error="Невірний індекс маршруту")
+            if idx < 0 or idx >= len(self.sim.edges):
+                return dict(error="Маршрут не знайдено")
+            e = self.sim.edges[idx]
+            if e.get("sea"):
+                return dict(error="Неможливо прокласти суходільну дорогу по морю")
+            if e.get("kind") == "road":
+                return dict(error="Тракт уже збудовано")
+            self._push_undo("будівництво дороги")
+            try:
+                _, cost_zm = RT.build_road(self.sim, idx)
+            except ValueError as ex:
+                return dict(error=str(ex))
+            self.save()
+            msg = self.sim.w["journal"][-1]["text"] if self.sim.w["journal"] else f"Дорогу збудовано ({cost_zm:.0f} зм)"
+            return dict(ok=True, message=msg, overview=self.overview())
+
     def _init_from_map(self, map_path, year=None, era=None, seed=1):
         imp = IM.import_map(map_path)
         ov_path = self.overrides_file
@@ -1549,7 +1579,7 @@ def make_handler(app: AppState, expected_hosts=None):
                     "/api/set_state", "/api/override", "/api/set_config", "/api/event_choice",
                     "/api/quest_accept", "/api/quest_complete", "/api/shop_buy", "/api/npc",
                     "/api/fork", "/api/save_slot", "/api/load_slot", "/api/delete_slot",
-                    "/api/report", "/api/upload_map", "/api/switch_map",
+                    "/api/report", "/api/build_road", "/api/upload_map", "/api/switch_map",
                 }
                 if path not in post_paths:
                     self._json({"error": "Not found"}, 404)
@@ -1561,6 +1591,8 @@ def make_handler(app: AppState, expected_hosts=None):
                     self._json(app.step(body.get("months", 1), body.get("report", False)))
                 elif path == "/api/step_async":
                     self._json(app.step_async(body.get("months", 1), body.get("report", False)))
+                elif path == "/api/build_road":
+                    self._json(app.build_road(body.get("edge_index")))
                 elif path == "/api/undo":
                     self._json(app.undo())
                 elif path == "/api/fire":

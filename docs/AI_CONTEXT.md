@@ -49,7 +49,7 @@ save/world.json (детермінований JSON-стан світу)
 - `burgs`: `{bid: {id, name, uk, state, core_state, occupied_by, province, market, x, y, pop, pop0, rural, capital, port, walls, citadel, culture, feature, cell, sat, raw, craft}}`
 - `states`: `{sid: {id, name, full_name, uk, form, gov_text, prefix_uk, continent, color, coins, lore, known, capital, culture, culture_name, religion, religion_name, landmass, neighbors, army, army0, army_cost, mercs, treasury, treasury_map, debt, rev0, tax_mult, poll_tax, sales_tax, prod_dev, readiness, stability, legitimacy, war_exhaustion, tech, food_sat, lux_sat, pop, pop_cache, gdp, truce, ruler: {name, age, traits, collective}, diplo_labels}}`
 - `provinces`: `{pid: {id, name, full_name, uk, form, form_uk, state, core_state, occupied_by, siege, assimilation, burg, burgs, color, pole, coa, blazon, specialty, lore, governor: {name, age, traits, loyalty}}}`
-- `edges`: `[{a, b, dist, cap, sea, flow}]` — ребра між ринками.
+- `edges`: `[{a, b, dist, cap, sea, kind, pts, flow}]` — планарні географічні ребра між ринками (`kind`: `road | trail | sea | prospective`; `pts` — спрощена полілінія маршруту з `pack.routes` або пряма).
 - `geography`: `{biomes, features, market_geo: {mid: {biome, feature, feature_name, lat, band, coast, river, province, region, specialties}}, regions: {pid: {name, state, center, markets, band, biome, coast, river, signature, specialties}}, derived}`
 - `trade_routes`: `[{id, name, markets, edges, dist, cap, sea}]` — магістралі (`routes.ensure_highways`).
 - `caravans`: `[{id, route_id, good, qty, unit_price, margin, origin, origin_market, origin_state, dest, at_market, leg_index, next_edge, eta_days, created_tick}]`
@@ -122,14 +122,14 @@ SVG витягується через `lxml.etree` (з виправленим st
   - `/api/config`, `/api/event_choices`, `/api/slots`, `/api/job?id=`
   - `/api/retail?burg=` (та `/api/shop?burg=`), `/api/route?from=&to=&mode=`, `/api/quests?state=`, `/api/quest_board?state=`, `/api/npc`
 - **POST**:
-  - Симуляція та час: `/api/step`, `/api/step_async`, `/api/undo`
+  - Симуляція та час: `/api/step`, `/api/step_async`, `/api/undo`, `/api/build_road`
   - Політика й події: `/api/fire`, `/api/declare`, `/api/peace`, `/api/set_state`, `/api/event_choice`, `/api/set_config`
   - D&D-шар: `/api/quest_accept`, `/api/quest_complete`, `/api/shop_buy`, `/api/npc`
   - Редактор / збереження / карти: `/api/override`, `/api/fork`, `/api/save_slot`, `/api/load_slot`, `/api/delete_slot`, `/api/report`, `/api/upload_map`, `/api/switch_map`
 
 ### Фронтенд (`ui.html`)
 
-- **Карта (Canvas + Path2D + offscreen-кеш)**: режими `political`, `provinces` (заливні полігони `GEO.provBodies` за лояльністю / окупацією / переходом територій, облоги `⚔`, клікабельність будь-якої точки провінції), `food`, `stability`, `wealth`, `war`, а також шари задоволеності, лояльності, торгівлі, дефіциту, географії та маршрутів/караванів.
+- **Карта (Canvas + Path2D + offscreen-кеш)**: режими `political`, `provinces` (заливні полігони `GEO.provBodies` за лояльністю / окупацією / переходом територій, облоги `⚔`, клікабельність будь-якої точки провінції), `food`, `stability`, `wealth`, `war`, `trade` (географічні торгові потоки по полілініях доріг/стежок/морських ліній + підсвічені пунктиром перспективні тракти `prospective_roads` з побудовою в 1 клік), а також шари задоволеності, лояльності, дефіциту, географії та маршрутів/караванів.
 - **Продуктивність**: HTTP-відповіді `>= 1024 Б` стискаються через `gzip` при `Accept-Encoding: gzip`, рендер зуму/перетягування батчиться через `requestAnimationFrame` (`scheduleDrawMap`), статичний векторний шар кешується в `_geoLayerCache`, а тривалі прогони (`months >= 6`) використовують `/api/step_async` + опитування `/api/job`.
 - **Вкладки / модалки**: Огляд і Держави (із таблицею провінцій та `#prov-modal`), Ринки й Товари, 🎲 D&D Стіл (крамниця з купівлею, маршрути, дошка квестів, NPC-генератор), Війни/Похід/Гільдії, Журнал і Керування ГМ (`config`, `event_choices`, `overrides`, `slots`/`fork`, імпорт карти).
 
@@ -158,7 +158,7 @@ SVG витягується через `lxml.etree` (з виправленим st
 
 ## 7. Набір тестів (`tests/test_feria_sim.py`)
 
-Усі **30** тестів запускаються командою `python -m unittest discover -s tests -v` або `pytest -v`:
+Усі **31** тестів запускаються командою `python -m unittest discover -s tests -v` або `pytest -v`:
 - Імпорт/формати й SVG (`test_import_formats`), калібрування (`test_calibration_and_simulation_invariants`)
 - D&D: роздріб/маршрути (`test_dnd_tools_retail_and_routes`), вибори подій/квести/крамниця (`test_event_choices_quest_lifecycle_and_shop_stock`)
 - Конфіг/пак (`test_config_contract_and_content_pack`), CLI+Undo (`test_cli_new_commands_and_undo`), звіти Obsidian (`test_report_outputs_are_dynamic_and_keep_unknown_notes`)
@@ -168,6 +168,7 @@ SVG витягується через `lxml.etree` (з виправленим st
 - Провінції та війна (`test_provinces_governors_and_territorial_war`)
 - Географія, спецтовари, каравани (`test_caravan_highways_and_delivery`, `test_caravan_config_and_legacy_save`, `test_geography_registry`, `test_geography_legacy_save`, `test_corrupted_geography_is_rebuilt`, `test_special_goods_catalog_and_conversion`, `test_special_goods_can_be_disabled`).
 - Прискорення та геометрія (`test_acceleration_geo_polygons_and_web_gzip` — `orjson`/`numpy`/`lxml`/`shapely` паритет, фікс самозакривних `<g .../>`, `prov_bodies`, `gzip` API, `/api/step_async`).
+- Географічні торгові потоки та будівництво доріг (`test_geographic_edges_and_prospective_road_build` — планарний граф Габріеля, трасування `pack.routes`, апгрейд застарілих хорд, `recommend_roads`, `POST /api/build_road` + Undo).
 
 ---
 

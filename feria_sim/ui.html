@@ -185,6 +185,15 @@
           <div class="scroll" style="max-height:200px" id="caravan-list"></div>
         </div>
         <div class="card">
+          <h3>⚒ Перспективні дороги (<span id="prosp-cnt">0</span>)
+            <span class="map-mode-bar" style="font-weight:400">
+              <button onclick="showTab('overview');document.getElementById('map-mode').value='trade';drawMap()">На карті</button>
+            </span>
+          </h3>
+          <p class="ledger-note">Шляхи з високим торговим потенціалом між сусідніми ринками (стежки й відсутні прямі тракти).</p>
+          <div class="scroll" style="max-height:210px" id="prospective-roads-list"></div>
+        </div>
+        <div class="card">
           <h3>Рішення майстра гри <span class="chip" id="choice-cnt">0</span></h3>
           <p class="ledger-note">Події з варіантами наслідків чекають на вибір. Рішення скасовуються кнопкою «Крок назад».</p>
           <div class="scroll" style="max-height:260px" id="event-choices-box"></div>
@@ -635,6 +644,7 @@ async function refresh() {
   renderWorldCharts();
   renderActiveEvents();
   renderCaravans();
+  renderProspectiveRoads();
   renderHighways();
   renderEventChoices();
   renderRecentJournal();
@@ -750,7 +760,7 @@ function updateMapLegend(mode) {
     food: '<span>Від стагнації до дефіциту</span>',
     food_sat: '<span>Бідний ↔ забезпечений</span>',
     loyalty: '<span>Коло — лояльність намісника</span>',
-    trade: '<span>Лінія — обсяг торгівлі</span>',
+    trade: '<span>Лінії — потік (дорога/стежка/море), пунктир ⚒ — перспективні тракти</span>',
     caravans: '<span>Суцільна лінія — магістраль, ● — караван із вантажем</span>',
     geography: '<span>Кільце — кліматичний пояс, ⚓ — порт, ≈ — річка, зірка — регіон зі specialties</span>',
     scarcity: '<span>Квадрат — ціна до бази</span>',
@@ -759,6 +769,18 @@ function updateMapLegend(mode) {
     war: '<span style="color:var(--bad)">● Війна / епідемія</span>',
   };
   el.innerHTML = base + '<span>' + (legends[mode] || legends.political) + '</span>' + hint;
+}
+function _strokeEdgePath(ctx, e) {
+  const pts = e.pts;
+  ctx.beginPath();
+  if (pts && pts.length >= 2) {
+    ctx.moveTo(pts[0][0], pts[0][1]);
+    for (let i = 1; i < pts.length; i++) ctx.lineTo(pts[i][0], pts[i][1]);
+  } else {
+    ctx.moveTo(e.ax, e.ay);
+    ctx.lineTo(e.bx, e.by);
+  }
+  ctx.stroke();
 }
 const _geoLayerCache = { canvas: document.createElement('canvas'), key: null };
 function _provLoyaltyColor(p) {
@@ -897,21 +919,62 @@ function drawMap() {
 
   if (document.getElementById('chk-routes').checked || mode === 'trade') {
     const maxFlow = mode === 'trade' ? Math.max(1, ...DATA.edges.map(e => Math.max(0, e.flow || 0))) : 1;
+    ctx.save();
     for (const e of DATA.edges) {
+      const ek = e.kind || (e.sea ? 'sea' : 'trail');
       if (mode === 'trade') {
         const f = Math.max(0, e.flow || 0);
         const t = Math.min(1, Math.pow(f / maxFlow, 0.35));
-        ctx.strokeStyle = heat(t, 0.88);
-        ctx.lineWidth = (1.1 + 5.2 * t) / view.s;
+        if (ek === 'prospective') {
+          ctx.setLineDash([4 / view.s, 4 / view.s]);
+          ctx.strokeStyle = 'rgba(212,166,74,0.34)';
+          ctx.lineWidth = 1.0 / view.s;
+        } else if (e.sea) {
+          ctx.setLineDash([6 / view.s, 4 / view.s]);
+          ctx.strokeStyle = heat(t, 0.78);
+          ctx.lineWidth = (1.0 + 4.4 * t) / view.s;
+        } else {
+          ctx.setLineDash(ek === 'trail' ? [8 / view.s, 3 / view.s] : []);
+          ctx.strokeStyle = heat(t, ek === 'road' ? 0.92 : 0.78);
+          ctx.lineWidth = (1.2 + 5.2 * t) / view.s;
+        }
       } else if (mode === 'wealth') {
+        ctx.setLineDash(e.sea ? [5 / view.s, 4 / view.s] : []);
         ctx.strokeStyle = e.sea ? rgba(MAP_COLORS.slate, 0.55) : rgba(MAP_COLORS.brass, 0.55);
         ctx.lineWidth = Math.max(1.0, Math.min(5.5, Math.sqrt(e.flow || 1) * 0.35)) / view.s;
       } else {
+        ctx.setLineDash(e.sea ? [5 / view.s, 4 / view.s] : []);
         ctx.strokeStyle = e.sea ? rgba(MAP_COLORS.slate, 0.30) : rgba(MAP_COLORS.brass, 0.32);
         ctx.lineWidth = Math.max(0.7, Math.min(4, Math.sqrt(e.flow || 1) * 0.25)) / view.s;
       }
-      ctx.beginPath(); ctx.moveTo(e.ax, e.ay); ctx.lineTo(e.bx, e.by); ctx.stroke();
+      _strokeEdgePath(ctx, e);
     }
+    ctx.restore();
+  }
+
+  if (mode === 'trade' && (DATA.prospective_roads || []).length) {
+    ctx.save();
+    for (const r of DATA.prospective_roads) {
+      ctx.strokeStyle = '#ffd166';
+      ctx.lineWidth = 2.6 / view.s;
+      ctx.setLineDash([8 / view.s, 5 / view.s]);
+      _strokeEdgePath(ctx, r);
+      if (Number.isFinite(r.mid_x) && Number.isFinite(r.mid_y)) {
+        const mr = 7.5 / Math.pow(view.s, 0.55);
+        ctx.setLineDash([]);
+        ctx.fillStyle = 'rgba(14,22,32,0.92)';
+        ctx.beginPath(); ctx.arc(r.mid_x, r.mid_y, mr, 0, Math.PI * 2); ctx.fill();
+        ctx.strokeStyle = '#ffd166';
+        ctx.lineWidth = 1.6 / view.s;
+        ctx.stroke();
+        ctx.fillStyle = '#ffd166';
+        ctx.font = `${Math.max(8, 10 / Math.pow(view.s, 0.65))}px sans-serif`;
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+        ctx.fillText('⚒', r.mid_x, r.mid_y);
+      }
+    }
+    ctx.restore();
   }
 
   // Магістралі й каравани — окремий шар поверх звичайних торгових ліній.
@@ -1123,6 +1186,19 @@ function initMapEvents() {
         return;
       }
     }
+    if (mode === 'trade' && (DATA.prospective_roads || []).length) {
+      let bestR = null, br = (16 / view.s) ** 2;
+      for (const r of DATA.prospective_roads) {
+        if (!Number.isFinite(r.mid_x) || !Number.isFinite(r.mid_y)) continue;
+        const d = (r.mid_x - wx)**2 + (r.mid_y - wy)**2;
+        if (d < br) { br = d; bestR = r; }
+      }
+      if (bestR) {
+        tip.innerHTML = `<b>⚒ ${escHtml(bestR.action_uk)}</b><br>${escHtml(bestR.a_uk)} ↔ ${escHtml(bestR.b_uk)}<br>Товари: ${escHtml((bestR.goods || []).join(', ') || 'різні')}<br>Вартість: <b>${fmtN(bestR.cost_zm)} зм</b> · ROI: <b>${bestR.roi}</b><br><span class="muted">Клік — збудувати тракт</span>`;
+        placeMapTip(tip, mx, my);
+        return;
+      }
+    }
     if (mode === 'geography') {
       let bestMk = null, bm = (16 / view.s) ** 2;
       for (const mk of DATA.markets) {
@@ -1173,6 +1249,15 @@ function initMapEvents() {
         if (hitPid != null) bestP = provs.find(p => p.id === hitPid) || null;
       }
       if (bestP) { openProvince(bestP.id); return; }
+    }
+    if (mode === 'trade' && (DATA.prospective_roads || []).length) {
+      let bestR = null, br = (16 / view.s) ** 2;
+      for (const r of DATA.prospective_roads) {
+        if (!Number.isFinite(r.mid_x) || !Number.isFinite(r.mid_y)) continue;
+        const d = (r.mid_x - wx)**2 + (r.mid_y - wy)**2;
+        if (d < br) { br = d; bestR = r; }
+      }
+      if (bestR) { buildRoad(bestR.edge_index); return; }
     }
     if (mode === 'geography') {
       let bestMk = null, bm = (16 / view.s) ** 2;
@@ -1251,6 +1336,29 @@ function renderCaravans() {
       <b>${escHtml(c.good_name || c.good)}</b> · ${escHtml(c.at_uk)} → ${escHtml(c.dest_uk)}<br>
       <span class="muted" style="font-size:11px">${escHtml(c.route_name)} · ETA ~${escHtml(c.eta_days)} дн.</span>
     </div>`).join('') || '<span class="muted">Караванів у дорозі немає</span>';
+}
+
+function renderProspectiveRoads() {
+  const list = DATA.prospective_roads || [];
+  const box = document.getElementById('prospective-roads-list');
+  const cnt = document.getElementById('prosp-cnt');
+  if (cnt) cnt.textContent = list.length;
+  if (!box) return;
+  box.innerHTML = list.map(r => `<div style="margin-bottom:7px;padding-bottom:6px;border-bottom:1px solid var(--rule);display:flex;justify-content:space-between;align-items:center;gap:8px">
+      <div>
+        <span class="tag ${r.kind === 'prospective' ? 'warn' : ''}">${r.kind === 'prospective' ? 'новий' : 'стежка'}</span>
+        <b>${escHtml(r.a_uk)} ↔ ${escHtml(r.b_uk)}</b> <span class="muted">(ROI ${r.roi})</span><br>
+        <span class="muted" style="font-size:11px">${escHtml((r.goods || []).join(', ') || 'баланс торгівлі')} · ${fmtN(r.dist)} км · ${fmtN(r.cost_zm)} зм</span>
+      </div>
+      <button onclick="buildRoad(${jsArg(r.edge_index)})" title="${escHtml(r.action_uk)}">⚒ Збудувати</button>
+    </div>`).join('') || '<span class="muted">Усі перспективні напрямки вже розбудовані як тракти.</span>';
+}
+
+async function buildRoad(edgeIndex) {
+  const res = await api('/api/build_road', { edge_index: Number(edgeIndex) });
+  if (res.error) { toast(res.error); return; }
+  await refresh();
+  toast(res.message || 'Тракт збудовано');
 }
 
 function renderHighways() {
