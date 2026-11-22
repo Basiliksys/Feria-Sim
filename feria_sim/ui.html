@@ -895,12 +895,14 @@ function drawMap() {
     ctx.beginPath(); ctx.moveTo(dx, 0); ctx.lineTo(dx, DATA.height); ctx.stroke();
   }
 
-  if (document.getElementById('chk-routes').checked) {
+  if (document.getElementById('chk-routes').checked || mode === 'trade') {
+    const maxFlow = mode === 'trade' ? Math.max(1, ...DATA.edges.map(e => Math.max(0, e.flow || 0))) : 1;
     for (const e of DATA.edges) {
       if (mode === 'trade') {
         const f = Math.max(0, e.flow || 0);
-        ctx.strokeStyle = heat(Math.min(1, Math.sqrt(f) / 8), 0.86);
-        ctx.lineWidth = Math.max(1.2, Math.min(7, Math.sqrt(f) * 0.55)) / view.s;
+        const t = Math.min(1, Math.pow(f / maxFlow, 0.35));
+        ctx.strokeStyle = heat(t, 0.88);
+        ctx.lineWidth = (1.1 + 5.2 * t) / view.s;
       } else if (mode === 'wealth') {
         ctx.strokeStyle = e.sea ? rgba(MAP_COLORS.slate, 0.55) : rgba(MAP_COLORS.brass, 0.55);
         ctx.lineWidth = Math.max(1.0, Math.min(5.5, Math.sqrt(e.flow || 1) * 0.35)) / view.s;
